@@ -36,6 +36,10 @@ function fragmentUtf8(text, chunkSizes) {
   return chunks;
 }
 
+function oneByteUtf8Chunks(text) {
+  return Array.from(new TextEncoder().encode(text), (byte) => Uint8Array.of(byte));
+}
+
 test("Codex SSE preserves fragmented UTF-8, framing, data lines, and chunk order", async () => {
   const payload = [
     ": keepalive\r\n",
@@ -48,9 +52,12 @@ test("Codex SSE preserves fragmented UTF-8, framing, data lines, and chunk order
     "data: [DONE]",
   ].join("");
   const received = [];
+  const chunks = oneByteUtf8Chunks(payload);
+
+  assert.ok(chunks.every((chunk) => chunk.byteLength === 1), "must split every UTF-8 byte");
 
   const output = await parseCodexSse(
-    createChunkedSseResponse(fragmentUtf8(payload, [1, 2, 3, 1, 5, 2, 4, 1, 3, 2])),
+    createChunkedSseResponse(chunks),
     (chunk) => received.push(chunk),
   );
 
@@ -70,9 +77,12 @@ test("OpenAI-compatible SSE preserves fragmented UTF-8, framing, data lines, and
     "data: [DONE]",
   ].join("");
   const received = [];
+  const chunks = oneByteUtf8Chunks(payload);
+
+  assert.ok(chunks.every((chunk) => chunk.byteLength === 1), "must split every UTF-8 byte");
 
   const output = await parseOpenAiSse(
-    createChunkedSseResponse(fragmentUtf8(payload, [2, 1, 4, 3, 1, 2, 5, 1, 3, 2])),
+    createChunkedSseResponse(chunks),
     (chunk) => received.push(chunk),
   );
 
