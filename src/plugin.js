@@ -1,6 +1,6 @@
 ﻿const { Plugin, PluginSettings, Notice } = window[Symbol.for("typora-plugin-core@v2")];
 
-import { callAi, callAiWithImage, abortCurrentRequest, createAiRequest } from "./api.js";
+import { abortCurrentRequest, createAiRequest } from "./api.js";
 import { DEFAULT_SETTINGS, mergeSettings, shortcutMatches } from "./config.js";
 import { EditorSelectionController } from "./editor.js";
 import { prepareImageInputForModel } from "./platform.js";
@@ -498,11 +498,23 @@ export default class AiEditPlugin extends Plugin {
       .replace(/\{question\}/g, question)
       .replace(/\{document\}/g, withContext ? this.editorSelection.getDocumentText() : "");
 
+    let activeRequest = null;
+    let generating = true;
+    let closed = false;
+
     const stream = createStreamDialog({
       title: "AI Q&A",
       waitingText: "Waiting for AI response...",
-      onStop: () => abortCurrentRequest(),
+      onStop: () => {
+        if (generating) {
+          activeRequest?.abort();
+        }
+      },
       onClose: (meta) => {
+        closed = true;
+        if (generating) {
+          activeRequest?.abort();
+        }
         if (meta?.reason !== "confirm") {
           this.scheduleRestoreCaret();
         }
@@ -510,9 +522,25 @@ export default class AiEditPlugin extends Plugin {
     });
 
     try {
-      const result = await callAi(promptConfig.system, userPrompt, settings, {
-        onChunk: (chunk) => stream.append(chunk),
+      const request = createAiRequest({
+        systemPrompt: promptConfig.system,
+        messages: [{ role: "user", content: userPrompt }],
+        settings,
+        onChunk: (chunk) => {
+          if (!closed) {
+            stream.append(chunk);
+          }
+        },
       });
+      activeRequest = request;
+      const result = await request.promise;
+      if (activeRequest === request) {
+        activeRequest = null;
+      }
+      generating = false;
+      if (closed) {
+        return;
+      }
       if (!result.trim()) {
         stream.showError("The model returned an empty response.");
         return;
@@ -524,6 +552,11 @@ export default class AiEditPlugin extends Plugin {
         },
       });
     } catch (error) {
+      activeRequest = null;
+      generating = false;
+      if (closed) {
+        return;
+      }
       if (error && error.name === "AbortError") {
         stream.showCompleted({
           confirmText: "Copy & Auto Paste",
@@ -574,11 +607,23 @@ export default class AiEditPlugin extends Plugin {
     };
     const userPrompt = promptConfig.user.replace(/\{question\}/g, question);
 
+    let activeRequest = null;
+    let generating = true;
+    let closed = false;
+
     const stream = createStreamDialog({
       title: "AI Image Q&A",
       waitingText: "Waiting for AI response...",
-      onStop: () => abortCurrentRequest(),
+      onStop: () => {
+        if (generating) {
+          activeRequest?.abort();
+        }
+      },
       onClose: (meta) => {
+        closed = true;
+        if (generating) {
+          activeRequest?.abort();
+        }
         if (meta?.reason !== "confirm") {
           this.scheduleRestoreCaret();
         }
@@ -586,9 +631,25 @@ export default class AiEditPlugin extends Plugin {
     });
 
     try {
-      const result = await callAiWithImage(promptConfig.system, userPrompt, imageInput, settings, {
-        onChunk: (chunk) => stream.append(chunk),
+      const request = createAiRequest({
+        systemPrompt: promptConfig.system,
+        messages: [{ role: "user", content: userPrompt, imageInput }],
+        settings,
+        onChunk: (chunk) => {
+          if (!closed) {
+            stream.append(chunk);
+          }
+        },
       });
+      activeRequest = request;
+      const result = await request.promise;
+      if (activeRequest === request) {
+        activeRequest = null;
+      }
+      generating = false;
+      if (closed) {
+        return;
+      }
       if (!result.trim()) {
         stream.showError("The model returned an empty response.");
         return;
@@ -600,6 +661,11 @@ export default class AiEditPlugin extends Plugin {
         },
       });
     } catch (error) {
+      activeRequest = null;
+      generating = false;
+      if (closed) {
+        return;
+      }
       if (error && error.name === "AbortError") {
         stream.showCompleted({
           confirmText: "Copy & Auto Paste",

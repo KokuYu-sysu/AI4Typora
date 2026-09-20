@@ -176,6 +176,37 @@ function createOptimizePlugin(selectedText, documentText = "") {
   return plugin;
 }
 
+function qaSettings() {
+  return {
+    ...optimizeSettings(),
+    prompts: {
+      ...optimizeSettings().prompts,
+      qa: { system: "qa system", user: "Question: {question}" },
+      qa_with_context: { system: "qa context system", user: "Question: {question}\nDocument: {document}" },
+      image_qa: { system: "image system", user: "Image question: {question}" },
+    },
+  };
+}
+
+function createQaPlugin() {
+  const plugin = new AiEditPlugin();
+  plugin.editorSelection = {
+    getDocumentText: () => "Document context",
+    restoreInsertionCaretCalls: 0,
+    restoreInsertionCaret() { this.restoreInsertionCaretCalls += 1; },
+    async autoPasteResponse() { return true; },
+  };
+  plugin.getSettings = qaSettings;
+  return plugin;
+}
+
+async function completeTextQaPrompts(document, question = "Question") {
+  completePrompt(document, question);
+  await Promise.resolve();
+  completePrompt(document, "");
+  await Promise.resolve();
+}
+
 test("prepareContextRewrite protects only selected math and leaves document context unchanged", () => {
   const selected = "Start $A$ then $$ B $$ end";
   const documentText = "Document $C$ remains verbatim.";
@@ -377,4 +408,91 @@ test("closing a dialog is idempotent and a stale close cannot clear a newer dial
   assert.ok(document.getElementById("ai-edit-stream-output"));
   second.close();
   assert.equal(secondCloseCount, 1);
+});
+
+test("closing a slow text Q&A dialog aborts its request and ignores late output", async () => {
+  closeAnyDialog("test cleanup");
+  const document = installFakeDom();
+  const originalFetch = globalThis.fetch;
+  const plugin = createQaPlugin();
+  let aborted = false;
+  let resolveResponse;
+  globalThis.fetch = (_url, options) => {
+    options.signal.addEventListener("abort", () => { aborted = true; }, { once: true });
+    return new Promise((resolve) => { resolveResponse = resolve; });
+  };
+
+  try {
+    const flow = plugin.openQaFlow();
+    await completeTextQaPrompts(document);
+    closeAnyDialog("superseded");
+    assert.equal(aborted, true);
+    resolveResponse(sseResponse(`data: ${JSON.stringify({ choices: [{ delta: { content: "late answer" } }] })}\n\n`));
+    await flow;
+    assert.equal(document.getElementById("ai-edit-dialog-overlay"), null);
+    assert.equal(plugin.editorSelection.restoreInsertionCaretCalls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("closing a slow image Q&A dialog aborts its request and ignores late output", async () => {
+  closeAnyDialog("test cleanup");
+  const document = installFakeDom();
+  const originalFetch = globalThis.fetch;
+  const plugin = createQaPlugin();
+  let aborted = false;
+  let resolveResponse;
+  globalThis.fetch = (_url, options) => {
+    const payload = JSON.parse(options.body);
+    assert.equal(payload.messages[1].content[1].image_url.url, "https://example.com/figure.png");
+    options.signal.addEventListener("abort", () => { aborted = true; }, { once: true });
+    return new Promise((resolve) => { resolveResponse = resolve; });
+  };
+
+  try {
+    const flow = plugin.openImageQaFlow({ src: "https://example.com/figure.png" });
+    completePrompt(document, "What does this show?");
+    await Promise.resolve();
+    closeAnyDialog("superseded");
+    assert.equal(aborted, true);
+    resolveResponse(sseResponse(`data: ${JSON.stringify({ choices: [{ delta: { content: "late image answer" } }] })}\n\n`));
+    await flow;
+    assert.equal(document.getElementById("ai-edit-dialog-overlay"), null);
+    assert.equal(plugin.editorSelection.restoreInsertionCaretCalls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("overlapping Q&A flows abort only the dialog that is superseded", async () => {
+  closeAnyDialog("test cleanup");
+  const document = installFakeDom();
+  const originalFetch = globalThis.fetch;
+  const plugin = createQaPlugin();
+  const requests = [];
+  globalThis.fetch = (_url, options) => new Promise((resolve) => {
+    const request = { aborted: false, resolve };
+    options.signal.addEventListener("abort", () => { request.aborted = true; }, { once: true });
+    requests.push(request);
+  });
+
+  try {
+    const textFlow = plugin.openQaFlow();
+    await completeTextQaPrompts(document);
+    assert.equal(requests.length, 1);
+    const imageFlow = plugin.openImageQaFlow({ src: "https://example.com/figure.png" });
+    assert.equal(requests[0].aborted, true);
+    completePrompt(document, "Image question");
+    await Promise.resolve();
+    assert.equal(requests.length, 2);
+    assert.equal(requests[1].aborted, false);
+
+    closeAnyDialog("close image");
+    assert.equal(requests[1].aborted, true);
+    for (const request of requests) request.resolve(sseResponse(""));
+    await Promise.all([textFlow, imageFlow]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
