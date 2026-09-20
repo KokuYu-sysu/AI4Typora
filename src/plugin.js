@@ -113,7 +113,7 @@ export default class AiEditPlugin extends Plugin {
         items: [
           {
             label: "AI Ask About Image",
-            description: "Ask questions about this image and insert the answer.",
+            description: "Ask questions about this image and auto-paste the copied answer at cursor.",
             value: "image_qa",
           },
           {
@@ -158,7 +158,7 @@ export default class AiEditPlugin extends Plugin {
         },
         {
           label: "AI Q&A",
-          description: "Ask a writing question and insert the answer.",
+          description: "Ask a writing question and auto-paste the copied answer at cursor.",
           value: "qa",
         },
       ],
@@ -237,6 +237,90 @@ export default class AiEditPlugin extends Plugin {
     window.setTimeout(() => {
       this.bypassNextContextMenu = false;
     }, 0);
+  }
+
+  scheduleRestoreCaret() {
+    window.setTimeout(() => {
+      this.editorSelection.restoreInsertionCaret();
+    }, 40);
+  }
+
+  copyTextFallback(text) {
+    try {
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "readonly");
+      area.style.position = "fixed";
+      area.style.left = "-10000px";
+      area.style.top = "0";
+      document.body.appendChild(area);
+      area.focus();
+      area.select();
+      const ok = document.execCommand("copy");
+      area.remove();
+      return !!ok;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async copyTextToClipboard(text) {
+    const content = String(text || "");
+    if (!content.trim()) {
+      return false;
+    }
+
+    try {
+      if (window.reqnode) {
+        const electron = window.reqnode("electron");
+        if (electron && electron.clipboard && typeof electron.clipboard.writeText === "function") {
+          electron.clipboard.writeText(content);
+          return true;
+        }
+      }
+    } catch (_) {}
+
+    try {
+      if (typeof require === "function") {
+        const electron = require("electron");
+        if (electron && electron.clipboard && typeof electron.clipboard.writeText === "function") {
+          electron.clipboard.writeText(content);
+          return true;
+        }
+      }
+    } catch (_) {}
+
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        await navigator.clipboard.writeText(content);
+        return true;
+      }
+    } catch (_) {}
+    return this.copyTextFallback(content);
+  }
+
+  async copyResponseAndAutoPaste(stream, value) {
+    const content = String(value || "").trim();
+    if (!content) {
+      stream.close("confirm");
+      showToast("Nothing to copy.", "error");
+      return;
+    }
+
+    const copied = await this.copyTextToClipboard(content);
+    stream.close("confirm");
+    window.setTimeout(async () => {
+      const pasted = await this.editorSelection.autoPasteResponse(content);
+      if (pasted) {
+        showToast("Copied and auto-pasted at cursor.", "success");
+        return;
+      }
+
+      showToast(
+        copied ? "Copied. Auto paste blocked, please press Ctrl+V." : "Copy failed. Please copy manually.",
+        copied ? "info" : "error",
+      );
+    }, 60);
   }
 
   async openOptimizeFlow(withContext) {
@@ -339,6 +423,11 @@ export default class AiEditPlugin extends Plugin {
       title: "AI Q&A",
       waitingText: "Waiting for AI response...",
       onStop: () => abortCurrentRequest(),
+      onClose: (meta) => {
+        if (meta?.reason !== "confirm") {
+          this.scheduleRestoreCaret();
+        }
+      },
     });
 
     try {
@@ -350,21 +439,17 @@ export default class AiEditPlugin extends Plugin {
         return;
       }
       stream.showCompleted({
-        confirmText: "Insert",
-        onConfirm: (value) => {
-          const ok = this.editorSelection.insertResponse(value);
-          stream.close();
-          showToast(ok ? "Response inserted." : "Insert failed.", ok ? "success" : "error");
+        confirmText: "Copy & Auto Paste",
+        onConfirm: async (value) => {
+          await this.copyResponseAndAutoPaste(stream, value);
         },
       });
     } catch (error) {
       if (error && error.name === "AbortError") {
         stream.showCompleted({
-          confirmText: "Insert",
-          onConfirm: (value) => {
-            const ok = this.editorSelection.insertResponse(value);
-            stream.close();
-            showToast(ok ? "Response inserted." : "Insert failed.", ok ? "success" : "error");
+          confirmText: "Copy & Auto Paste",
+          onConfirm: async (value) => {
+            await this.copyResponseAndAutoPaste(stream, value);
           },
         });
       } else {
@@ -414,6 +499,11 @@ export default class AiEditPlugin extends Plugin {
       title: "AI Image Q&A",
       waitingText: "Waiting for AI response...",
       onStop: () => abortCurrentRequest(),
+      onClose: (meta) => {
+        if (meta?.reason !== "confirm") {
+          this.scheduleRestoreCaret();
+        }
+      },
     });
 
     try {
@@ -425,21 +515,17 @@ export default class AiEditPlugin extends Plugin {
         return;
       }
       stream.showCompleted({
-        confirmText: "Insert",
-        onConfirm: (value) => {
-          const ok = this.editorSelection.insertResponse(value);
-          stream.close();
-          showToast(ok ? "Response inserted." : "Insert failed.", ok ? "success" : "error");
+        confirmText: "Copy & Auto Paste",
+        onConfirm: async (value) => {
+          await this.copyResponseAndAutoPaste(stream, value);
         },
       });
     } catch (error) {
       if (error && error.name === "AbortError") {
         stream.showCompleted({
-          confirmText: "Insert",
-          onConfirm: (value) => {
-            const ok = this.editorSelection.insertResponse(value);
-            stream.close();
-            showToast(ok ? "Response inserted." : "Insert failed.", ok ? "success" : "error");
+          confirmText: "Copy & Auto Paste",
+          onConfirm: async (value) => {
+            await this.copyResponseAndAutoPaste(stream, value);
           },
         });
       } else {

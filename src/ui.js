@@ -280,6 +280,18 @@ export function createStreamDialog(options) {
   const waitingText = options.waitingText || "Waiting for response...";
   let completedActions = null;
 
+  function emitClose(reason) {
+    if (typeof options.onClose === "function") {
+      try {
+        options.onClose({
+          reason,
+          value: getOutputText(),
+          rawValue: output.value === waitingText ? "" : output.value,
+        });
+      } catch (_) {}
+    }
+  }
+
   function getOutputText() {
     if (output.value === waitingText) {
       return "";
@@ -288,9 +300,10 @@ export function createStreamDialog(options) {
   }
 
   function copyOutputAndClose() {
-    navigator.clipboard?.writeText(output.value).catch(() => {});
+    const text = output.value === waitingText ? "" : output.value;
+    navigator.clipboard?.writeText(text).catch(() => {});
     showToast("Copied to clipboard.", "success");
-    api.close();
+    api.close("copy");
   }
 
   function runConfirm() {
@@ -354,23 +367,24 @@ export function createStreamDialog(options) {
           copyOutputAndClose();
         }
         if (action === "close") {
-          api.close();
+          api.close("close");
         }
         if (action === "confirm") {
           runConfirm();
         }
       };
     },
-    close() {
+    close(reason = "close") {
       document.removeEventListener("keydown", onDialogKeyDown, true);
       closeOverlay(overlay);
+      emitClose(reason);
     },
   };
 
   overlay.addEventListener("click", (event) => {
     const action = event.target?.dataset?.action;
     if (action === "close") {
-      api.close();
+      api.close("close");
     }
     if (action === "stop" && options.onStop) {
       options.onStop();
