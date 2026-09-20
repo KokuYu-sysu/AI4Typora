@@ -218,23 +218,24 @@ function scanFormulaEntries(text, codeRanges) {
   };
 
   while (cursor < text.length) {
-    if (candidate === null) {
-      while (
-        codeRangeIndex < codeRanges.length &&
-        codeRanges[codeRangeIndex].start < cursor
-      ) {
-        codeRangeIndex += 1;
-      }
-      if (
-        codeRangeIndex < codeRanges.length &&
-        codeRanges[codeRangeIndex].start === cursor
-      ) {
-        cursor = codeRanges[codeRangeIndex].end;
-        codeRangeIndex += 1;
-        precedingBackslashes = 0;
-        continue;
-      }
+    while (
+      codeRangeIndex < codeRanges.length &&
+      codeRanges[codeRangeIndex].start < cursor
+    ) {
+      codeRangeIndex += 1;
+    }
+    if (
+      codeRangeIndex < codeRanges.length &&
+      codeRanges[codeRangeIndex].start === cursor
+    ) {
+      candidate = null;
+      cursor = codeRanges[codeRangeIndex].end;
+      codeRangeIndex += 1;
+      precedingBackslashes = 0;
+      continue;
+    }
 
+    if (candidate === null) {
       const character = text[cursor];
       if (character === "\\") {
         if (

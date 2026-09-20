@@ -7,6 +7,25 @@ import {
   restoreMathPreview,
 } from "../src/math-protection.js";
 
+function assertSingleProtectedFormula(input, protectedText, source) {
+  const result = protectMath(input);
+  const start = input.lastIndexOf(source);
+
+  assert.equal(result.protectedText, protectedText);
+  assert.deepEqual(result.entries, [
+    {
+      token: "⟪AI_EDIT_MATH_0⟫",
+      source,
+      start,
+      end: start + source.length,
+    },
+  ]);
+  assert.deepEqual(restoreMath(result.protectedText, result.entries), {
+    ok: true,
+    text: input,
+  });
+}
+
 test("protects inline and display math and restores the exact input", () => {
   const input = "Before $A$ and $$ B + C $$ after.";
   const result = protectMath(input);
@@ -158,6 +177,46 @@ test("rejects a backtick fence opener whose info string contains a backtick", ()
 
   assert.equal(result.protectedText, "```lang`bad\n⟪AI_EDIT_MATH_0⟫\n");
   assert.deepEqual(result.entries.map(({ source }) => source), ["$math$"]);
+});
+
+test("abandons pending display-dollar math at a fenced-code boundary", () => {
+  const input = "before $$ open\n```\ninside $$\n```\nafter $ok$";
+
+  assertSingleProtectedFormula(
+    input,
+    "before $$ open\n```\ninside $$\n```\nafter ⟪AI_EDIT_MATH_0⟫",
+    "$ok$",
+  );
+});
+
+test("abandons pending bracket math at a fenced-code boundary", () => {
+  const input = "before \\[ open\n~~~\ninside \\]\n~~~\nafter \\(ok\\)";
+
+  assertSingleProtectedFormula(
+    input,
+    "before \\[ open\n~~~\ninside \\]\n~~~\nafter ⟪AI_EDIT_MATH_0⟫",
+    "\\(ok\\)",
+  );
+});
+
+test("abandons pending display-dollar math at an inline-code boundary", () => {
+  const input = "before $$ open ``inside $$`` after $ok$";
+
+  assertSingleProtectedFormula(
+    input,
+    "before $$ open ``inside $$`` after ⟪AI_EDIT_MATH_0⟫",
+    "$ok$",
+  );
+});
+
+test("abandons pending bracket math at an inline-code boundary", () => {
+  const input = "before \\[ open ``inside \\]`` after \\(ok\\)";
+
+  assertSingleProtectedFormula(
+    input,
+    "before \\[ open ``inside \\]`` after ⟪AI_EDIT_MATH_0⟫",
+    "\\(ok\\)",
+  );
 });
 
 test("leaves unmatched opening delimiters byte-for-byte unchanged", () => {
