@@ -40,6 +40,31 @@ function oneByteUtf8Chunks(text) {
   return Array.from(new TextEncoder().encode(text), (byte) => Uint8Array.of(byte));
 }
 
+function createTrackedReaderResponse(chunks) {
+  let index = 0;
+  const state = { cancelCalls: 0, releaseCalls: 0 };
+  const reader = {
+    async read() {
+      if (index < chunks.length) {
+        const value = chunks[index];
+        index += 1;
+        return { done: false, value };
+      }
+      return { done: true };
+    },
+    async cancel() {
+      state.cancelCalls += 1;
+    },
+    releaseLock() {
+      state.releaseCalls += 1;
+    },
+  };
+  return {
+    response: { body: { getReader: () => reader } },
+    state,
+  };
+}
+
 test("Codex SSE preserves fragmented UTF-8, framing, data lines, and chunk order", async () => {
   const payload = [
     ": keepalive\r\n",
@@ -102,6 +127,78 @@ test("SSE parsers process a final unframed data event", async () => {
     await parseOpenAiSse(createChunkedSseResponse(fragmentUtf8(openAiPayload, [1, 2, 1]))),
     "final",
   );
+});
+
+test("OpenAI-compatible SSE parses a sizable one-byte-fragmented event", async () => {
+  const content = "x".repeat(20 * 1024);
+  const payload = `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`;
+  const received = [];
+
+  const output = await parseOpenAiSse(
+    createChunkedSseResponse(oneByteUtf8Chunks(payload)),
+    (chunk) => received.push(chunk),
+  );
+
+  assert.equal(output, content);
+  assert.deepEqual(received, [content]);
+});
+
+test("SSE reader cancels and releases a reader after a malformed event", async () => {
+  const encoder = new TextEncoder();
+  const tracked = createTrackedReaderResponse([encoder.encode("data: {bad}\n\n")]);
+
+  await assert.rejects(
+    () => parseOpenAiSse(tracked.response),
+    /OpenAI-compatible SSE JSON parse failed/,
+  );
+  assert.equal(tracked.state.cancelCalls, 1);
+  assert.equal(tracked.state.releaseCalls, 1);
+});
+
+test("SSE reader releases without cancellation after normal EOF", async () => {
+  const encoder = new TextEncoder();
+  const tracked = createTrackedReaderResponse([
+    encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "complete" } }] })}\n\n`),
+  ]);
+
+  assert.equal(await parseOpenAiSse(tracked.response), "complete");
+  assert.equal(tracked.state.cancelCalls, 0);
+  assert.equal(tracked.state.releaseCalls, 1);
+});
+
+test("SSE reader cancels and releases a reader after an onChunk callback error", async () => {
+  const encoder = new TextEncoder();
+  const tracked = createTrackedReaderResponse([
+    encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "chunk" } }] })}\n\n`),
+  ]);
+
+  await assert.rejects(
+    () => parseOpenAiSse(tracked.response, () => {
+      throw new Error("onChunk failed");
+    }),
+    /onChunk failed/,
+  );
+  assert.equal(tracked.state.cancelCalls, 1);
+  assert.equal(tracked.state.releaseCalls, 1);
+});
+
+test("SSE parser flushes decoder residue before reporting malformed JSON", async () => {
+  const OriginalTextDecoder = globalThis.TextDecoder;
+  class DeferredTextDecoder {
+    decode(value) {
+      return value ? "data: " : "{bad}\n\n";
+    }
+  }
+  globalThis.TextDecoder = DeferredTextDecoder;
+
+  try {
+    await assert.rejects(
+      () => parseOpenAiSse(createChunkedSseResponse([Uint8Array.of(1)])),
+      /OpenAI-compatible SSE JSON parse failed/,
+    );
+  } finally {
+    globalThis.TextDecoder = OriginalTextDecoder;
+  }
 });
 
 test("SSE parsers ignore final blank data events", async () => {

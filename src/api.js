@@ -14,15 +14,17 @@ async function* readSseData(response) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let scanPosition = 0;
   let dataLines = [];
 
   function readLine(isFinal) {
-    for (let index = 0; index < buffer.length; index += 1) {
+    for (let index = scanPosition; index < buffer.length; index += 1) {
       const character = buffer[index];
       if (character !== "\r" && character !== "\n") {
         continue;
       }
       if (character === "\r" && index === buffer.length - 1 && !isFinal) {
+        scanPosition = index;
         return null;
       }
 
@@ -31,14 +33,17 @@ async function* readSseData(response) {
         : index + 1;
       const line = buffer.slice(0, index);
       buffer = buffer.slice(nextIndex);
+      scanPosition = 0;
       return line;
     }
 
     if (isFinal && buffer) {
       const line = buffer;
       buffer = "";
+      scanPosition = 0;
       return line;
     }
+    scanPosition = buffer.length;
     return null;
   }
 
@@ -77,22 +82,39 @@ async function* readSseData(response) {
     }
   }
 
-  while (true) {
-    const chunk = await reader.read();
-    if (chunk.done) {
-      break;
+  let reachedEof = false;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) {
+        reachedEof = true;
+        break;
+      }
+
+      buffer += decoder.decode(chunk.value, { stream: true });
+      yield* emitCompleteLines(false);
     }
 
-    buffer += decoder.decode(chunk.value, { stream: true });
-    yield* emitCompleteLines(false);
-  }
-
-  buffer += decoder.decode();
-  yield* emitCompleteLines(true);
-  if (dataLines.length) {
-    const data = dataLines.join("\n");
-    if (data) {
-      yield data;
+    buffer += decoder.decode();
+    yield* emitCompleteLines(true);
+    if (dataLines.length) {
+      const data = dataLines.join("\n");
+      if (data) {
+        yield data;
+      }
+    }
+  } finally {
+    if (!reachedEof) {
+      try {
+        await reader.cancel();
+      } catch {
+        // Preserve the original parsing or callback error.
+      }
+    }
+    try {
+      reader.releaseLock();
+    } catch {
+      // Preserve the original parsing or callback error.
     }
   }
 }
