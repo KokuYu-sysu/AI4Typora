@@ -10,11 +10,72 @@ export function abortCurrentRequest() {
   }
 }
 
-async function parseCodexSse(response, onChunk) {
+async function* readSseData(response) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  let result = "";
+  let dataLines = [];
+
+  function readLine(isFinal) {
+    for (let index = 0; index < buffer.length; index += 1) {
+      const character = buffer[index];
+      if (character !== "\r" && character !== "\n") {
+        continue;
+      }
+      if (character === "\r" && index === buffer.length - 1 && !isFinal) {
+        return null;
+      }
+
+      const nextIndex = character === "\r" && buffer[index + 1] === "\n"
+        ? index + 2
+        : index + 1;
+      const line = buffer.slice(0, index);
+      buffer = buffer.slice(nextIndex);
+      return line;
+    }
+
+    if (isFinal && buffer) {
+      const line = buffer;
+      buffer = "";
+      return line;
+    }
+    return null;
+  }
+
+  function processLine(line) {
+    if (line === "") {
+      const data = dataLines.join("\n");
+      dataLines = [];
+      return data;
+    }
+    if (line.startsWith(":")) {
+      return null;
+    }
+
+    const separatorIndex = line.indexOf(":");
+    const field = separatorIndex === -1 ? line : line.slice(0, separatorIndex);
+    let value = separatorIndex === -1 ? "" : line.slice(separatorIndex + 1);
+    if (value.startsWith(" ")) {
+      value = value.slice(1);
+    }
+    if (field === "data") {
+      dataLines.push(value);
+    }
+    return null;
+  }
+
+  async function* emitCompleteLines(isFinal) {
+    while (true) {
+      const line = readLine(isFinal);
+      if (line === null) {
+        break;
+      }
+      const data = processLine(line);
+      if (data !== null && data !== "") {
+        yield data;
+      }
+    }
+  }
 
   while (true) {
     const chunk = await reader.read();
@@ -23,30 +84,59 @@ async function parseCodexSse(response, onChunk) {
     }
 
     buffer += decoder.decode(chunk.value, { stream: true });
-    const events = buffer.split("\n\n");
-    buffer = events.pop();
+    yield* emitCompleteLines(false);
+  }
 
-    for (const eventBlock of events) {
-      let data = "";
-      for (const line of eventBlock.split("\n")) {
-        if (line.startsWith("data:")) {
-          data += line.slice(5).trimStart();
-        }
-      }
+  buffer += decoder.decode();
+  yield* emitCompleteLines(true);
+  if (dataLines.length) {
+    const data = dataLines.join("\n");
+    if (data) {
+      yield data;
+    }
+  }
+}
 
-      if (!data || data === "[DONE]") {
-        continue;
-      }
+function parseSseJson(data, providerName) {
+  try {
+    return JSON.parse(data);
+  } catch (error) {
+    throw new Error(`${providerName} SSE JSON parse failed: ${error.message}`);
+  }
+}
 
-      const event = JSON.parse(data);
-      if (event.type === "response.output_text.delta" && event.delta) {
-        result += event.delta;
-        if (onChunk) {
-          onChunk(event.delta);
-        }
-      }
-      if (event.type === "error" || event.type === "response.failed") {
-        throw new Error(event.message || "Request failed.");
+function getProviderErrorMessage(event, fallback) {
+  if (typeof event?.message === "string" && event.message) {
+    return event.message;
+  }
+  if (typeof event?.error === "string" && event.error) {
+    return event.error;
+  }
+  if (typeof event?.error?.message === "string" && event.error.message) {
+    return event.error.message;
+  }
+  if (typeof event?.response?.error?.message === "string" && event.response.error.message) {
+    return event.response.error.message;
+  }
+  return fallback;
+}
+
+export async function parseCodexSse(response, onChunk) {
+  let result = "";
+
+  for await (const data of readSseData(response)) {
+    if (data.trim() === "[DONE]") {
+      continue;
+    }
+
+    const event = parseSseJson(data, "Codex");
+    if (event.type === "error" || event.type === "response.failed") {
+      throw new Error(getProviderErrorMessage(event, "Codex request failed."));
+    }
+    if (event.type === "response.output_text.delta" && event.delta) {
+      result += event.delta;
+      if (onChunk) {
+        onChunk(event.delta);
       }
     }
   }
@@ -54,40 +144,23 @@ async function parseCodexSse(response, onChunk) {
   return result;
 }
 
-async function parseOpenAiSse(response, onChunk) {
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
+export async function parseOpenAiSse(response, onChunk) {
   let result = "";
 
-  while (true) {
-    const chunk = await reader.read();
-    if (chunk.done) {
-      break;
+  for await (const data of readSseData(response)) {
+    if (data.trim() === "[DONE]") {
+      continue;
     }
 
-    buffer += decoder.decode(chunk.value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop();
-
-    for (const rawLine of lines) {
-      const line = rawLine.trim();
-      if (!line.startsWith("data:")) {
-        continue;
-      }
-
-      const data = line.slice(5).trim();
-      if (!data || data === "[DONE]") {
-        continue;
-      }
-
-      const event = JSON.parse(data);
-      const delta = event?.choices?.[0]?.delta?.content;
-      if (delta) {
-        result += delta;
-        if (onChunk) {
-          onChunk(delta);
-        }
+    const event = parseSseJson(data, "OpenAI-compatible");
+    if (event?.error || event?.type === "error") {
+      throw new Error(getProviderErrorMessage(event, "OpenAI-compatible request failed."));
+    }
+    const delta = event?.choices?.[0]?.delta?.content;
+    if (delta) {
+      result += delta;
+      if (onChunk) {
+        onChunk(delta);
       }
     }
   }
