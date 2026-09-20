@@ -1,7 +1,167 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
 import test from "node:test";
 
-import { parseCodexSse, parseOpenAiSse } from "../src/api.js";
+import * as api from "../src/api.js";
+
+const { parseCodexSse, parseOpenAiSse } = api;
+globalThis.require = createRequire(import.meta.url);
+
+test("createAiRequest returns a synchronous request handle", () => {
+  assert.equal(typeof api.createAiRequest, "function");
+
+  const handle = api.createAiRequest({
+    systemPrompt: "system",
+    messages: [],
+    settings: { provider: "openai_compat" },
+  });
+
+  assert.ok(handle.promise instanceof Promise);
+  assert.equal(typeof handle.abort, "function");
+  void handle.promise.catch(() => {});
+  handle.abort();
+  handle.abort();
+});
+
+test("OpenAI-compatible requests preserve normalized multi-turn messages", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestOptions;
+  globalThis.fetch = async (_url, options) => {
+    requestOptions = options;
+    const payload = `data: ${JSON.stringify({ choices: [{ delta: { content: "ok" } }] })}\n\n`;
+    return createChunkedSseResponse([new TextEncoder().encode(payload)]);
+  };
+
+  try {
+    const handle = api.createAiRequest({
+      systemPrompt: "system rules",
+      messages: [
+        { role: "user", content: "first question" },
+        { role: "assistant", content: "first answer" },
+        { role: "user", content: "look here", imageInput: "data:image/png;base64,AAA=" },
+      ],
+      settings: {
+        provider: "openai_compat",
+        openaiCompat: {
+          baseUrl: "https://primary.example.com/",
+          apiKey: "key",
+          model: "model",
+        },
+      },
+    });
+
+    assert.equal(await handle.promise, "ok");
+    assert.deepEqual(JSON.parse(requestOptions.body).messages, [
+      { role: "system", content: "system rules" },
+      { role: "user", content: "first question" },
+      { role: "assistant", content: "first answer" },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "look here" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,AAA=" } },
+        ],
+      },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("ChatGPT OAuth requests preserve normalized multi-turn input", async () => {
+  const originalFetch = globalThis.fetch;
+  const tokenPath = path.resolve("test", `.tmp-api-streaming-token-${process.pid}.json`);
+  fs.writeFileSync(tokenPath, JSON.stringify({
+    access: "access-token",
+    refresh: "refresh-token",
+    expires: Date.now() + 3_600_000,
+    account_id: "account-id",
+  }));
+  let requestOptions;
+  globalThis.fetch = async (_url, options) => {
+    requestOptions = options;
+    const payload = `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "oauth-ok" })}\n\n`;
+    return createChunkedSseResponse([new TextEncoder().encode(payload)]);
+  };
+
+  try {
+    const handle = api.createAiRequest({
+      systemPrompt: "system rules",
+      messages: [
+        { role: "user", content: "first question" },
+        { role: "assistant", content: "first answer" },
+        { role: "user", content: "look here", imageInput: "https://example.com/image.png" },
+      ],
+      settings: {
+        provider: "chatgpt_oauth",
+        model: "gpt-5.4",
+        oauthTokenPath: tokenPath,
+      },
+    });
+
+    assert.equal(await handle.promise, "oauth-ok");
+    const body = JSON.parse(requestOptions.body);
+    assert.equal(body.instructions, "system rules");
+    assert.deepEqual(body.input, [
+      { role: "user", content: [{ type: "input_text", text: "first question" }] },
+      { role: "assistant", content: [{ type: "input_text", text: "first answer" }] },
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: "look here" },
+          { type: "input_image", image_url: "https://example.com/image.png" },
+        ],
+      },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(tokenPath, { force: true });
+  }
+});
+
+test("simultaneous request handles abort independently", async () => {
+  const originalFetch = globalThis.fetch;
+  const pending = [];
+  globalThis.fetch = (_url, options) => new Promise((resolve, reject) => {
+    const request = { signal: options.signal, resolve, reject };
+    pending.push(request);
+    options.signal.addEventListener("abort", () => {
+      const error = new Error("aborted");
+      error.name = "AbortError";
+      reject(error);
+    }, { once: true });
+  });
+  const settings = {
+    provider: "openai_compat",
+    openaiCompat: {
+      baseUrl: "https://primary.example.com",
+      apiKey: "key",
+      model: "model",
+    },
+  };
+
+  try {
+    const first = api.createAiRequest({ systemPrompt: "sys", messages: [], settings });
+    const second = api.createAiRequest({ systemPrompt: "sys", messages: [], settings });
+    assert.equal(pending.length, 2);
+    assert.notEqual(pending[0].signal, pending[1].signal);
+
+    const firstRejected = assert.rejects(first.promise, { name: "AbortError" });
+    first.abort();
+    first.abort();
+    assert.equal(pending[0].signal.aborted, true);
+    assert.equal(pending[1].signal.aborted, false);
+
+    const payload = `data: ${JSON.stringify({ choices: [{ delta: { content: "still-running" } }] })}\n\n`;
+    pending[1].resolve(createChunkedSseResponse([new TextEncoder().encode(payload)]));
+    assert.equal(await second.promise, "still-running");
+    await firstRejected;
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 function createChunkedSseResponse(chunks) {
   return {

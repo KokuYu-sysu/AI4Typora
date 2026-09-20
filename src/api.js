@@ -1,12 +1,11 @@
 import { getFreshToken } from "./platform.js";
 
 const CODEX_URL = "https://chatgpt.com/backend-api/codex/responses";
-let currentAbortController = null;
+let legacyActiveRequest = null;
 
 export function abortCurrentRequest() {
-  if (currentAbortController) {
-    currentAbortController.abort();
-    currentAbortController = null;
+  if (legacyActiveRequest) {
+    legacyActiveRequest.abort();
   }
 }
 
@@ -251,20 +250,38 @@ function getCompatCandidates(settings) {
   return ordered;
 }
 
-async function callChatGptOauthApi(systemPrompt, userPrompt, settings, handlers, imageInput = null) {
+function toCodexInput(messages) {
+  return messages.map((message) => {
+    const content = [
+      { type: "input_text", text: message.content },
+    ];
+    if (message.imageInput) {
+      content.push({ type: "input_image", image_url: message.imageInput });
+    }
+    return { role: message.role, content };
+  });
+}
+
+function toOpenAiMessages(systemPrompt, messages) {
+  return [
+    { role: "system", content: systemPrompt },
+    ...messages.map((message) => ({
+      role: message.role,
+      content: message.imageInput
+        ? [
+          { type: "text", text: message.content },
+          { type: "image_url", image_url: { url: message.imageInput } },
+        ]
+        : message.content,
+    })),
+  ];
+}
+
+async function callChatGptOauthApi(systemPrompt, messages, settings, onChunk, signal) {
   const token = await getFreshToken(settings);
   if (!token) {
     throw new Error("OAuth token unavailable.");
   }
-
-  const content = [
-    { type: "input_text", text: userPrompt },
-  ];
-  if (imageInput) {
-    content.push({ type: "input_image", image_url: imageInput });
-  }
-
-  currentAbortController = new AbortController();
   const response = await fetch(CODEX_URL, {
     method: "POST",
     headers: {
@@ -281,15 +298,10 @@ async function callChatGptOauthApi(systemPrompt, userPrompt, settings, handlers,
       store: false,
       stream: true,
       instructions: systemPrompt,
-      input: [
-        {
-          role: "user",
-          content,
-        },
-      ],
+      input: toCodexInput(messages),
       include: ["reasoning.encrypted_content"],
     }),
-    signal: currentAbortController.signal,
+    signal,
   });
 
   if (!response.ok) {
@@ -297,18 +309,10 @@ async function callChatGptOauthApi(systemPrompt, userPrompt, settings, handlers,
     throw new Error(`API ${response.status}: ${errorText.slice(0, 200)}`);
   }
 
-  return parseCodexSse(response, handlers?.onChunk);
+  return parseCodexSse(response, onChunk);
 }
 
-async function callOpenAiCompatApi(systemPrompt, userPrompt, compat, handlers, imageInput = null) {
-  const userContent = imageInput
-    ? [
-      { type: "text", text: userPrompt },
-      { type: "image_url", image_url: { url: imageInput } },
-    ]
-    : userPrompt;
-
-  currentAbortController = new AbortController();
+async function callOpenAiCompatApi(systemPrompt, messages, compat, onChunk, signal) {
   const response = await fetch(`${String(compat.baseUrl).replace(/\/+$/g, "")}/chat/completions`, {
     method: "POST",
     headers: {
@@ -319,12 +323,9 @@ async function callOpenAiCompatApi(systemPrompt, userPrompt, compat, handlers, i
     body: JSON.stringify({
       model: compat.model,
       stream: true,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userContent },
-      ],
+      messages: toOpenAiMessages(systemPrompt, messages),
     }),
-    signal: currentAbortController.signal,
+    signal,
   });
 
   if (!response.ok) {
@@ -332,10 +333,17 @@ async function callOpenAiCompatApi(systemPrompt, userPrompt, compat, handlers, i
     throw new Error(`API ${response.status}: ${errorText.slice(0, 200)}`);
   }
 
-  return parseOpenAiSse(response, handlers?.onChunk);
+  return parseOpenAiSse(response, onChunk);
 }
 
-async function callOpenAiCompatApiWithFailover(systemPrompt, userPrompt, settings, handlers, imageInput = null) {
+async function callOpenAiCompatApiWithFailover(
+  systemPrompt,
+  messages,
+  settings,
+  onChunk,
+  onAttemptStart,
+  signal,
+) {
   const candidates = getCompatCandidates(settings);
   if (!candidates.length) {
     throw new Error("OpenAI compatible API is not configured.");
@@ -343,14 +351,35 @@ async function callOpenAiCompatApiWithFailover(systemPrompt, userPrompt, setting
 
   const failoverEnabled = settings?.openaiCompatFailoverEnabled !== false;
   const failures = [];
+  let previousAttemptEmittedOutput = false;
   for (let i = 0; i < candidates.length; i += 1) {
     const candidate = candidates[i];
+    if (onAttemptStart) {
+      onAttemptStart({
+        attemptIndex: i,
+        name: candidate.name,
+        resetOutput: previousAttemptEmittedOutput,
+      });
+    }
+    let attemptEmittedOutput = false;
     try {
-      return await callOpenAiCompatApi(systemPrompt, userPrompt, candidate, handlers, imageInput);
+      return await callOpenAiCompatApi(
+        systemPrompt,
+        messages,
+        candidate,
+        (chunk) => {
+          attemptEmittedOutput = true;
+          if (onChunk) {
+            onChunk(chunk);
+          }
+        },
+        signal,
+      );
     } catch (error) {
       if (error?.name === "AbortError") {
         throw error;
       }
+      previousAttemptEmittedOutput = attemptEmittedOutput;
       failures.push(`${candidate.name}: ${error?.message || "Unknown error"}`);
       if (!failoverEnabled || i === candidates.length - 1) {
         break;
@@ -361,24 +390,70 @@ async function callOpenAiCompatApiWithFailover(systemPrompt, userPrompt, setting
   throw new Error(`All OpenAI compatible connections failed. ${failures.join(" | ")}`.trim());
 }
 
+export function createAiRequest({
+  systemPrompt,
+  messages,
+  settings,
+  onChunk,
+  onAttemptStart,
+}) {
+  const controller = new AbortController();
+  const normalizedMessages = Array.isArray(messages) ? messages : [];
+  const promise = settings?.provider === "openai_compat"
+    ? callOpenAiCompatApiWithFailover(
+      systemPrompt,
+      normalizedMessages,
+      settings,
+      onChunk,
+      onAttemptStart,
+      controller.signal,
+    )
+    : callChatGptOauthApi(
+      systemPrompt,
+      normalizedMessages,
+      settings,
+      onChunk,
+      controller.signal,
+    );
+
+  return {
+    promise,
+    abort: () => controller.abort(),
+  };
+}
+
 export async function callAi(systemPrompt, userPrompt, settings, handlers = {}) {
+  const handle = createAiRequest({
+    systemPrompt,
+    messages: [{ role: "user", content: userPrompt }],
+    settings,
+    onChunk: handlers.onChunk,
+    onAttemptStart: handlers.onAttemptStart,
+  });
+  legacyActiveRequest = handle;
   try {
-    if (settings.provider === "openai_compat") {
-      return await callOpenAiCompatApiWithFailover(systemPrompt, userPrompt, settings, handlers, null);
-    }
-    return await callChatGptOauthApi(systemPrompt, userPrompt, settings, handlers, null);
+    return await handle.promise;
   } finally {
-    currentAbortController = null;
+    if (legacyActiveRequest === handle) {
+      legacyActiveRequest = null;
+    }
   }
 }
 
 export async function callAiWithImage(systemPrompt, userPrompt, imageInput, settings, handlers = {}) {
+  const handle = createAiRequest({
+    systemPrompt,
+    messages: [{ role: "user", content: userPrompt, imageInput }],
+    settings,
+    onChunk: handlers.onChunk,
+    onAttemptStart: handlers.onAttemptStart,
+  });
+  legacyActiveRequest = handle;
   try {
-    if (settings.provider === "openai_compat") {
-      return await callOpenAiCompatApiWithFailover(systemPrompt, userPrompt, settings, handlers, imageInput);
-    }
-    return await callChatGptOauthApi(systemPrompt, userPrompt, settings, handlers, imageInput);
+    return await handle.promise;
   } finally {
-    currentAbortController = null;
+    if (legacyActiveRequest === handle) {
+      legacyActiveRequest = null;
+    }
   }
 }
