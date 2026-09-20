@@ -369,6 +369,7 @@ export default class AiEditPlugin extends Plugin {
     let rawOutput = "";
     let generating = true;
     let stopped = false;
+    let stoppedCompleted = false;
     let closed = false;
 
     const stream = createStreamDialog({
@@ -388,6 +389,17 @@ export default class AiEditPlugin extends Plugin {
         }
       },
     });
+
+    function showStoppedCompletion() {
+      if (stoppedCompleted) {
+        return;
+      }
+      stoppedCompleted = true;
+      stream.showCompleted({
+        replaceAllowed: false,
+        validationMessage: "Request stopped. Partial response is available to copy.",
+      });
+    }
 
     try {
       const request = createAiRequest({
@@ -418,7 +430,11 @@ export default class AiEditPlugin extends Plugin {
         activeRequest = null;
       }
       generating = false;
-      if (closed || stopped) {
+      if (closed) {
+        return;
+      }
+      if (stopped) {
+        showStoppedCompletion();
         return;
       }
       if (!result.trim()) {
@@ -456,12 +472,14 @@ export default class AiEditPlugin extends Plugin {
         return;
       }
       if (error && error.name === "AbortError") {
+        if (stopped) {
+          showStoppedCompletion();
+          return;
+        }
         stream.showCompleted({
           confirmText: "Replace",
           replaceAllowed: false,
-          validationMessage: stopped
-            ? "Request stopped. Partial response was not applied."
-            : "Request cancelled. Partial response was not applied.",
+          validationMessage: "Request cancelled. Partial response was not applied.",
         });
       } else {
         stream.showError(error?.message || "The request failed.");
@@ -501,6 +519,7 @@ export default class AiEditPlugin extends Plugin {
     let activeRequest = null;
     let generating = true;
     let stopped = false;
+    let stoppedCompleted = false;
     let closed = false;
 
     const stream = createStreamDialog({
@@ -524,6 +543,17 @@ export default class AiEditPlugin extends Plugin {
       },
     });
 
+    function showStoppedCompletion() {
+      if (stoppedCompleted) {
+        return;
+      }
+      stoppedCompleted = true;
+      stream.showCompleted({
+        replaceAllowed: false,
+        validationMessage: "Request stopped. Partial response is available to copy.",
+      });
+    }
+
     try {
       const request = createAiRequest({
         systemPrompt: promptConfig.system,
@@ -546,7 +576,11 @@ export default class AiEditPlugin extends Plugin {
         activeRequest = null;
       }
       generating = false;
-      if (closed || stopped) {
+      if (closed) {
+        return;
+      }
+      if (stopped) {
+        showStoppedCompletion();
         return;
       }
       if (!result.trim()) {
@@ -566,6 +600,10 @@ export default class AiEditPlugin extends Plugin {
         return;
       }
       if (error && error.name === "AbortError") {
+        if (stopped) {
+          showStoppedCompletion();
+          return;
+        }
         stream.showCompleted({
           confirmText: "Copy & Auto Paste",
           onConfirm: async (value) => {
@@ -618,6 +656,7 @@ export default class AiEditPlugin extends Plugin {
     let activeRequest = null;
     let generating = true;
     let stopped = false;
+    let stoppedCompleted = false;
     let closed = false;
 
     const stream = createStreamDialog({
@@ -641,6 +680,17 @@ export default class AiEditPlugin extends Plugin {
       },
     });
 
+    function showStoppedCompletion() {
+      if (stoppedCompleted) {
+        return;
+      }
+      stoppedCompleted = true;
+      stream.showCompleted({
+        replaceAllowed: false,
+        validationMessage: "Request stopped. Partial response is available to copy.",
+      });
+    }
+
     try {
       const request = createAiRequest({
         systemPrompt: promptConfig.system,
@@ -663,7 +713,11 @@ export default class AiEditPlugin extends Plugin {
         activeRequest = null;
       }
       generating = false;
-      if (closed || stopped) {
+      if (closed) {
+        return;
+      }
+      if (stopped) {
+        showStoppedCompletion();
         return;
       }
       if (!result.trim()) {
@@ -683,6 +737,10 @@ export default class AiEditPlugin extends Plugin {
         return;
       }
       if (error && error.name === "AbortError") {
+        if (stopped) {
+          showStoppedCompletion();
+          return;
+        }
         stream.showCompleted({
           confirmText: "Copy & Auto Paste",
           onConfirm: async (value) => {

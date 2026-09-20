@@ -98,6 +98,7 @@ class FakeElement {
 function installFakeDom() {
   const keyListeners = new Set();
   let keydownRemoveCount = 0;
+  let copiedText = null;
   const dragListeners = {
     mousemove: new Set(),
     mouseup: new Set(),
@@ -135,8 +136,9 @@ function installFakeDom() {
   globalThis.document = document;
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
-    value: { clipboard: { writeText: async () => {} } },
+    value: { clipboard: { writeText: async (text) => { copiedText = text; } } },
   });
+  document.getCopiedText = () => copiedText;
   globalThis.window = { ...globalThis.window, innerWidth: 1200, innerHeight: 800, setTimeout(callback) { callback(); } };
   return document;
 }
@@ -237,7 +239,8 @@ function createQaPlugin() {
     getDocumentText: () => "Document context",
     restoreInsertionCaretCalls: 0,
     restoreInsertionCaret() { this.restoreInsertionCaretCalls += 1; },
-    async autoPasteResponse() { return true; },
+    autoPasteResponseCalls: 0,
+    async autoPasteResponse() { this.autoPasteResponseCalls += 1; return true; },
   };
   plugin.getSettings = qaSettings;
   return plugin;
@@ -382,8 +385,15 @@ test("stopping optimize freezes pre-stop output when an abort-ignoring provider 
     const output = document.getElementById("ai-edit-stream-output");
     const footer = document.getElementById("ai-edit-stream-footer");
     assert.equal(output.value, "pre-stop optimize");
+    const copy = findAction(footer, "copy");
+    assert.ok(copy);
+    assert.ok(findAction(footer, "close"));
     assert.equal(findAction(footer, "confirm"), null);
+    assert.equal(findAction(footer, "stop"), null);
     assert.deepEqual(plugin.editorSelection.replaced, []);
+    footer.onclick({ target: copy });
+    assert.equal(document.getCopiedText(), "pre-stop optimize");
+    assert.equal(document.getElementById("ai-edit-dialog-overlay"), null);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -612,7 +622,15 @@ test("stopping text Q&A freezes pre-stop output when an abort-ignoring provider 
     const output = document.getElementById("ai-edit-stream-output");
     const footer = document.getElementById("ai-edit-stream-footer");
     assert.equal(output.value, "pre-stop text answer");
+    const copy = findAction(footer, "copy");
+    assert.ok(copy);
+    assert.ok(findAction(footer, "close"));
     assert.equal(findAction(footer, "confirm"), null);
+    assert.equal(findAction(footer, "stop"), null);
+    assert.equal(plugin.editorSelection.autoPasteResponseCalls, 0);
+    footer.onclick({ target: copy });
+    assert.equal(document.getCopiedText(), "pre-stop text answer");
+    assert.equal(document.getElementById("ai-edit-dialog-overlay"), null);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -671,7 +689,15 @@ test("stopping image Q&A freezes pre-stop output when an abort-ignoring provider
     const output = document.getElementById("ai-edit-stream-output");
     const footer = document.getElementById("ai-edit-stream-footer");
     assert.equal(output.value, "pre-stop image answer");
+    const copy = findAction(footer, "copy");
+    assert.ok(copy);
+    assert.ok(findAction(footer, "close"));
     assert.equal(findAction(footer, "confirm"), null);
+    assert.equal(findAction(footer, "stop"), null);
+    assert.equal(plugin.editorSelection.autoPasteResponseCalls, 0);
+    footer.onclick({ target: copy });
+    assert.equal(document.getCopiedText(), "pre-stop image answer");
+    assert.equal(document.getElementById("ai-edit-dialog-overlay"), null);
   } finally {
     globalThis.fetch = originalFetch;
   }
