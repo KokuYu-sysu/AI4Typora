@@ -277,11 +277,38 @@ function toOpenAiMessages(systemPrompt, messages) {
   ];
 }
 
+function throwIfAborted(signal) {
+  if (!signal?.aborted) {
+    return;
+  }
+  if (signal.reason) {
+    throw signal.reason;
+  }
+  const error = new Error("The operation was aborted.");
+  error.name = "AbortError";
+  throw error;
+}
+
+async function readErrorResponseText(response, signal) {
+  try {
+    const errorText = await response.text();
+    throwIfAborted(signal);
+    return errorText;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw error;
+    }
+    throwIfAborted(signal);
+    return "";
+  }
+}
+
 async function callChatGptOauthApi(systemPrompt, messages, settings, onChunk, signal) {
   const token = await getFreshToken(settings);
   if (!token) {
     throw new Error("OAuth token unavailable.");
   }
+  throwIfAborted(signal);
   const response = await fetch(CODEX_URL, {
     method: "POST",
     headers: {
@@ -305,7 +332,7 @@ async function callChatGptOauthApi(systemPrompt, messages, settings, onChunk, si
   });
 
   if (!response.ok) {
-    const errorText = await response.text().catch(() => "");
+    const errorText = await readErrorResponseText(response, signal);
     throw new Error(`API ${response.status}: ${errorText.slice(0, 200)}`);
   }
 
@@ -313,6 +340,7 @@ async function callChatGptOauthApi(systemPrompt, messages, settings, onChunk, si
 }
 
 async function callOpenAiCompatApi(systemPrompt, messages, compat, onChunk, signal) {
+  throwIfAborted(signal);
   const response = await fetch(`${String(compat.baseUrl).replace(/\/+$/g, "")}/chat/completions`, {
     method: "POST",
     headers: {
@@ -329,7 +357,7 @@ async function callOpenAiCompatApi(systemPrompt, messages, compat, onChunk, sign
   });
 
   if (!response.ok) {
-    const errorText = await response.text().catch(() => "");
+    const errorText = await readErrorResponseText(response, signal);
     throw new Error(`API ${response.status}: ${errorText.slice(0, 200)}`);
   }
 
@@ -353,6 +381,7 @@ async function callOpenAiCompatApiWithFailover(
   const failures = [];
   let previousAttemptEmittedOutput = false;
   for (let i = 0; i < candidates.length; i += 1) {
+    throwIfAborted(signal);
     const candidate = candidates[i];
     if (onAttemptStart) {
       onAttemptStart({
@@ -379,6 +408,7 @@ async function callOpenAiCompatApiWithFailover(
       if (error?.name === "AbortError") {
         throw error;
       }
+      throwIfAborted(signal);
       previousAttemptEmittedOutput = attemptEmittedOutput;
       failures.push(`${candidate.name}: ${error?.message || "Unknown error"}`);
       if (!failoverEnabled || i === candidates.length - 1) {

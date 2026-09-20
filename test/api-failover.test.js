@@ -114,3 +114,51 @@ test("abort errors never trigger OpenAI-compatible failover", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("aborting a non-2xx error-body read does not start failover", async () => {
+  const originalFetch = globalThis.fetch;
+  let callCount = 0;
+  let markBodyReadStarted;
+  const bodyReadStarted = new Promise((resolve) => {
+    markBodyReadStarted = resolve;
+  });
+  globalThis.fetch = async (_url, options) => {
+    callCount += 1;
+    if (callCount > 1) {
+      return createSseResponse("unexpected-backup");
+    }
+    return {
+      ok: false,
+      status: 500,
+      text: () => new Promise((_resolve, reject) => {
+        markBodyReadStarted();
+        options.signal.addEventListener("abort", () => {
+          const error = new Error("error body read aborted");
+          error.name = "AbortError";
+          reject(error);
+        }, { once: true });
+      }),
+    };
+  };
+  const attempts = [];
+
+  try {
+    const handle = createAiRequest({
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "user" }],
+      settings: createSettings(),
+      onAttemptStart: (attempt) => attempts.push(attempt),
+    });
+
+    await bodyReadStarted;
+    handle.abort();
+
+    await assert.rejects(handle.promise, { name: "AbortError" });
+    assert.equal(callCount, 1);
+    assert.deepEqual(attempts, [
+      { attemptIndex: 0, name: "Primary", resetOutput: false },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
