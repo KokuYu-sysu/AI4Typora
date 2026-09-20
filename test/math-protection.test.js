@@ -110,6 +110,56 @@ test("ignores math-looking text in backtick and tilde fenced code blocks", () =>
   assert.deepEqual(result.entries.map(({ source }) => source), ["$yes$"]);
 });
 
+test("ignores math in tilde fences nested inside block quotes", () => {
+  const input = "> ~~~\n> $code$\n> ~~~\n$math$";
+  const result = protectMath(input);
+
+  assert.equal(
+    result.protectedText,
+    "> ~~~\n> $code$\n> ~~~\n⟪AI_EDIT_MATH_0⟫",
+  );
+  assert.deepEqual(result.entries.map(({ source }) => source), ["$math$"]);
+});
+
+test("ignores math in nested block-quoted backtick fences", () => {
+  const input = "> > ```js\r\n> > $code$\r\n> > ```\r\n$math$";
+  const result = protectMath(input);
+
+  assert.equal(
+    result.protectedText,
+    "> > ```js\r\n> > $code$\r\n> > ```\r\n⟪AI_EDIT_MATH_0⟫",
+  );
+  assert.deepEqual(result.entries.map(({ source }) => source), ["$math$"]);
+});
+
+test("ends an unclosed quoted fence when its block quote container ends", () => {
+  const input = "> ~~~\n> $code$\noutside $math$";
+  const result = protectMath(input);
+
+  assert.equal(
+    result.protectedText,
+    "> ~~~\n> $code$\noutside ⟪AI_EDIT_MATH_0⟫",
+  );
+  assert.deepEqual(result.entries.map(({ source }) => source), ["$math$"]);
+});
+
+test("keeps math untouched through an unclosed quoted fence at EOF", () => {
+  const input = "> ~~~\n> $code$\n> ~~\n> $stillCode$";
+
+  assert.deepEqual(protectMath(input), {
+    protectedText: input,
+    entries: [],
+  });
+});
+
+test("rejects a backtick fence opener whose info string contains a backtick", () => {
+  const input = "```lang`bad\n$math$\n";
+  const result = protectMath(input);
+
+  assert.equal(result.protectedText, "```lang`bad\n⟪AI_EDIT_MATH_0⟫\n");
+  assert.deepEqual(result.entries.map(({ source }) => source), ["$math$"]);
+});
+
 test("leaves unmatched opening delimiters byte-for-byte unchanged", () => {
   const input = "inline $open\ndisplay $$open\nparen \\(open\nbracket \\[open";
 
@@ -139,6 +189,15 @@ test("allows escaped characters inside formulas", () => {
   assert.deepEqual(restoreMath(result.protectedText, result.entries), {
     ok: true,
     text: input,
+  });
+});
+
+test("handles many unmatched latex openers and long backslash runs in one forward scan", () => {
+  const input = `${"\\(".repeat(1_500)}${"\\[".repeat(1_500)}${"\\".repeat(12_000)}tail`;
+
+  assert.deepEqual(protectMath(input), {
+    protectedText: input,
+    entries: [],
   });
 });
 
@@ -371,4 +430,18 @@ test("restore helpers do not mutate entries", () => {
     text: "$a$ and $b$",
   });
   assert.deepEqual(result.entries, snapshot);
+});
+
+test("preview and strict restore handle a formula-dense response in one scan", () => {
+  const input = Array.from({ length: 1_000 }, (_, index) => `$x_${index}$`).join(
+    " ",
+  );
+  const result = protectMath(input);
+
+  assert.equal(result.entries.length, 1_000);
+  assert.equal(restoreMathPreview(result.protectedText, result.entries), input);
+  assert.deepEqual(restoreMath(result.protectedText, result.entries), {
+    ok: true,
+    text: input,
+  });
 });

@@ -17,16 +17,6 @@ function findSentinelLikeMatches(text) {
   }));
 }
 
-function isEscaped(text, index) {
-  let backslashes = 0;
-
-  for (let cursor = index - 1; cursor >= 0 && text[cursor] === "\\"; cursor -= 1) {
-    backslashes += 1;
-  }
-
-  return backslashes % 2 === 1;
-}
-
 function lineEndIndex(text, start) {
   let cursor = start;
   while (cursor < text.length && text[cursor] !== "\r" && text[cursor] !== "\n") {
@@ -41,213 +31,305 @@ function nextLineIndex(text, end) {
   return end + 1;
 }
 
-function fenceAtLineStart(text, lineStart) {
+function blockquoteContentStart(text, lineStart, lineEnd) {
   let cursor = lineStart;
-  let indent = 0;
+  let depth = 0;
 
+  while (cursor < lineEnd) {
+    const prefixStart = cursor;
+    let spaces = 0;
+    while (spaces < 3 && text[cursor] === " ") {
+      spaces += 1;
+      cursor += 1;
+    }
+    if (text[cursor] !== ">") {
+      cursor = prefixStart;
+      break;
+    }
+
+    depth += 1;
+    cursor += 1;
+    if (text[cursor] === " " || text[cursor] === "\t") cursor += 1;
+  }
+
+  return { contentStart: cursor, depth };
+}
+
+function fenceOnLine(text, lineStart, lineEnd) {
+  const container = blockquoteContentStart(text, lineStart, lineEnd);
+  let cursor = container.contentStart;
+  let indent = 0;
   while (indent < 3 && text[cursor] === " ") {
     indent += 1;
     cursor += 1;
   }
 
   const marker = text[cursor];
-  if (marker !== "`" && marker !== "~") return null;
+  if (marker !== "`" && marker !== "~") return { ...container, fence: null };
 
   const runStart = cursor;
   while (text[cursor] === marker) cursor += 1;
   const length = cursor - runStart;
-  if (length < 3) return null;
+  if (length < 3) return { ...container, fence: null };
 
-  return { marker, length };
+  return {
+    ...container,
+    fence: {
+      marker,
+      length,
+      rest: text.slice(cursor, lineEnd),
+    },
+  };
 }
 
-function isClosingFenceLine(text, lineStart, fence) {
-  let cursor = lineStart;
-  let indent = 0;
-
-  while (indent < 3 && text[cursor] === " ") {
-    indent += 1;
-    cursor += 1;
-  }
-
-  const runStart = cursor;
-  while (text[cursor] === fence.marker) cursor += 1;
-  if (cursor - runStart < fence.length) return false;
-
-  const end = lineEndIndex(text, cursor);
-  while (cursor < end && (text[cursor] === " " || text[cursor] === "\t")) {
-    cursor += 1;
-  }
-  return cursor === end;
+function isFenceCloser(fence, activeFence) {
+  return (
+    fence !== null &&
+    fence.marker === activeFence.marker &&
+    fence.length >= activeFence.length &&
+    /^[ \t]*$/.test(fence.rest)
+  );
 }
 
-function fencedBlockEnd(text, lineStart, fence) {
-  let cursor = nextLineIndex(text, lineEndIndex(text, lineStart));
+function isFenceOpener(fence) {
+  if (fence === null) return false;
+  return fence.marker !== "`" || !fence.rest.includes("`");
+}
 
-  while (cursor < text.length) {
-    const end = lineEndIndex(text, cursor);
-    if (isClosingFenceLine(text, cursor, fence)) {
-      return nextLineIndex(text, end);
+function findFencedCodeRanges(text) {
+  const ranges = [];
+  let activeFence = null;
+  let lineStart = 0;
+
+  while (lineStart < text.length) {
+    const lineEnd = lineEndIndex(text, lineStart);
+    const parsed = fenceOnLine(text, lineStart, lineEnd);
+
+    if (
+      activeFence !== null &&
+      activeFence.quoteDepth > 0 &&
+      parsed.depth < activeFence.quoteDepth
+    ) {
+      ranges.push({ start: activeFence.start, end: lineStart });
+      activeFence = null;
+      continue;
     }
-    cursor = nextLineIndex(text, end);
+
+    const afterLine = nextLineIndex(text, lineEnd);
+    if (activeFence !== null) {
+      if (
+        parsed.depth === activeFence.quoteDepth &&
+        isFenceCloser(parsed.fence, activeFence)
+      ) {
+        ranges.push({ start: activeFence.start, end: afterLine });
+        activeFence = null;
+      }
+      lineStart = afterLine;
+      continue;
+    }
+
+    if (isFenceOpener(parsed.fence)) {
+      activeFence = {
+        ...parsed.fence,
+        start: lineStart,
+        quoteDepth: parsed.depth,
+      };
+    }
+    lineStart = afterLine;
   }
 
-  return text.length;
+  if (activeFence !== null) {
+    ranges.push({ start: activeFence.start, end: text.length });
+  }
+  return ranges;
 }
 
-function backtickRunLength(text, start) {
+function appendInlineCodeRanges(text, start, end, ranges) {
+  const runs = [];
   let cursor = start;
-  while (text[cursor] === "`") cursor += 1;
-  return cursor - start;
-}
-
-function inlineCodeEnd(text, start) {
-  const openingLength = backtickRunLength(text, start);
-  let cursor = start + openingLength;
-
-  while (cursor < text.length) {
+  while (cursor < end) {
     if (text[cursor] !== "`") {
       cursor += 1;
       continue;
     }
 
-    const length = backtickRunLength(text, cursor);
-    if (length === openingLength) return cursor + length;
-    cursor += length;
+    const runStart = cursor;
+    while (cursor < end && text[cursor] === "`") cursor += 1;
+    runs.push({ start: runStart, end: cursor, length: cursor - runStart });
   }
 
-  return null;
-}
-
-function displayDollarEnd(text, start) {
-  let cursor = start + 2;
-
-  while (cursor < text.length - 1) {
-    if (
-      text[cursor] === "$" &&
-      text[cursor + 1] === "$" &&
-      !isEscaped(text, cursor)
-    ) {
-      return cursor + 2;
+  const nextSameRun = new Map();
+  const nextByLength = new Map();
+  for (let index = runs.length - 1; index >= 0; index -= 1) {
+    const run = runs[index];
+    if (nextByLength.has(run.length)) {
+      nextSameRun.set(run.start, nextByLength.get(run.length));
     }
-    cursor += 1;
+    nextByLength.set(run.length, run);
   }
 
-  return null;
-}
-
-function inlineDollarEnd(text, start) {
-  let cursor = start + 1;
-
-  while (cursor < text.length) {
-    const character = text[cursor];
-    if (character === "\r" || character === "\n") return null;
-
-    if (character === "$" && !isEscaped(text, cursor)) {
-      if (text[cursor + 1] === "$" && !isEscaped(text, cursor + 1)) {
-        return null;
-      }
-      if (text[cursor - 1] !== "$" || isEscaped(text, cursor - 1)) {
-        return cursor + 1;
-      }
-    }
-    cursor += 1;
-  }
-
-  return null;
-}
-
-function latexEnd(text, start, closingCharacter, allowNewlines) {
-  let cursor = start + 2;
-
-  while (cursor < text.length - 1) {
-    if (!allowNewlines && (text[cursor] === "\r" || text[cursor] === "\n")) {
-      return null;
-    }
-    if (
-      text[cursor] === "\\" &&
-      text[cursor + 1] === closingCharacter &&
-      !isEscaped(text, cursor)
-    ) {
-      return cursor + 2;
-    }
-    cursor += 1;
-  }
-
-  return null;
-}
-
-function mathEndAt(text, start) {
-  if (
-    text[start] === "$" &&
-    text[start + 1] === "$" &&
-    !isEscaped(text, start)
-  ) {
-    return displayDollarEnd(text, start);
-  }
-
-  if (
-    text[start] === "$" &&
-    (text[start - 1] !== "$" || isEscaped(text, start - 1)) &&
-    (text[start + 1] !== "$" || isEscaped(text, start + 1)) &&
-    !isEscaped(text, start)
-  ) {
-    return inlineDollarEnd(text, start);
-  }
-
-  if (text[start] === "\\" && !isEscaped(text, start)) {
-    if (text[start + 1] === "(") return latexEnd(text, start, ")", false);
-    if (text[start + 1] === "[") return latexEnd(text, start, "]", true);
-  }
-
-  return null;
-}
-
-export function protectMath(text) {
-  const formulaEntries = [];
-  const segments = [];
-  let cursor = 0;
-  let unchangedStart = 0;
-
-  while (cursor < text.length) {
-    const atLineStart =
-      cursor === 0 || text[cursor - 1] === "\n" || text[cursor - 1] === "\r";
-
-    if (atLineStart) {
-      const fence = fenceAtLineStart(text, cursor);
-      if (fence) {
-        cursor = fencedBlockEnd(text, cursor, fence);
-        continue;
-      }
-    }
-
-    if (text[cursor] === "`") {
-      const codeEnd = inlineCodeEnd(text, cursor);
-      if (codeEnd !== null) {
-        cursor = codeEnd;
-        continue;
-      }
-      cursor += backtickRunLength(text, cursor);
+  let index = 0;
+  while (index < runs.length) {
+    const opening = runs[index];
+    const closing = nextSameRun.get(opening.start);
+    if (closing === undefined) {
+      index += 1;
       continue;
     }
 
-    const end = mathEndAt(text, cursor);
-    if (end === null) {
+    ranges.push({ start: opening.start, end: closing.end });
+    index += 1;
+    while (index < runs.length && runs[index].start < closing.end) index += 1;
+  }
+}
+
+function findCodeRanges(text) {
+  const fencedRanges = findFencedCodeRanges(text);
+  const ranges = [];
+  let segmentStart = 0;
+
+  for (const fencedRange of fencedRanges) {
+    appendInlineCodeRanges(text, segmentStart, fencedRange.start, ranges);
+    ranges.push(fencedRange);
+    segmentStart = fencedRange.end;
+  }
+  appendInlineCodeRanges(text, segmentStart, text.length, ranges);
+  return ranges;
+}
+
+function scanFormulaEntries(text, codeRanges) {
+  const entries = [];
+  let codeRangeIndex = 0;
+  let cursor = 0;
+  let precedingBackslashes = 0;
+  let candidate = null;
+
+  const finishCandidate = (end) => {
+    const token = mathToken(entries.length);
+    entries.push({
+      token,
+      source: text.slice(candidate.start, end),
+      start: candidate.start,
+      end,
+    });
+    candidate = null;
+    precedingBackslashes = 0;
+    cursor = end;
+  };
+
+  while (cursor < text.length) {
+    if (candidate === null) {
+      while (
+        codeRangeIndex < codeRanges.length &&
+        codeRanges[codeRangeIndex].start < cursor
+      ) {
+        codeRangeIndex += 1;
+      }
+      if (
+        codeRangeIndex < codeRanges.length &&
+        codeRanges[codeRangeIndex].start === cursor
+      ) {
+        cursor = codeRanges[codeRangeIndex].end;
+        codeRangeIndex += 1;
+        precedingBackslashes = 0;
+        continue;
+      }
+
+      const character = text[cursor];
+      if (character === "\\") {
+        if (
+          precedingBackslashes % 2 === 0 &&
+          (text[cursor + 1] === "(" || text[cursor + 1] === "[")
+        ) {
+          candidate = {
+            kind: text[cursor + 1] === "(" ? "paren" : "bracket",
+            start: cursor,
+          };
+          cursor += 2;
+          precedingBackslashes = 0;
+          continue;
+        }
+        precedingBackslashes += 1;
+        cursor += 1;
+        continue;
+      }
+
+      if (character === "$" && precedingBackslashes % 2 === 0) {
+        candidate = {
+          kind: text[cursor + 1] === "$" ? "display-dollar" : "inline-dollar",
+          start: cursor,
+        };
+        cursor += candidate.kind === "display-dollar" ? 2 : 1;
+        precedingBackslashes = 0;
+        continue;
+      }
+
+      precedingBackslashes = 0;
       cursor += 1;
       continue;
     }
 
-    const token = mathToken(formulaEntries.length);
-    const source = text.slice(cursor, end);
+    const character = text[cursor];
+    if (
+      (candidate.kind === "inline-dollar" || candidate.kind === "paren") &&
+      (character === "\r" || character === "\n")
+    ) {
+      candidate = null;
+      precedingBackslashes = 0;
+      cursor += 1;
+      continue;
+    }
+
+    if (character === "\\") {
+      const closingCharacter = candidate.kind === "paren" ? ")" : "]";
+      if (
+        (candidate.kind === "paren" || candidate.kind === "bracket") &&
+        precedingBackslashes % 2 === 0 &&
+        text[cursor + 1] === closingCharacter
+      ) {
+        finishCandidate(cursor + 2);
+        continue;
+      }
+      precedingBackslashes += 1;
+      cursor += 1;
+      continue;
+    }
+
+    const escaped = precedingBackslashes % 2 === 1;
+    precedingBackslashes = 0;
+    if (character === "$" && !escaped) {
+      if (candidate.kind === "inline-dollar") {
+        if (text[cursor + 1] === "$") {
+          candidate = null;
+          continue;
+        }
+        finishCandidate(cursor + 1);
+        continue;
+      }
+      if (candidate.kind === "display-dollar" && text[cursor + 1] === "$") {
+        finishCandidate(cursor + 2);
+        continue;
+      }
+    }
+    cursor += 1;
+  }
+
+  return entries;
+}
+
+export function protectMath(text) {
+  const formulaEntries = scanFormulaEntries(text, findCodeRanges(text));
+  const segments = [];
+  let unchangedStart = 0;
+
+  for (const entry of formulaEntries) {
     segments.push({
       kind: "text",
-      source: text.slice(unchangedStart, cursor),
+      source: text.slice(unchangedStart, entry.start),
       start: unchangedStart,
     });
-    segments.push({ kind: "math", source: token });
-    formulaEntries.push({ token, source, start: cursor, end });
-    cursor = end;
-    unchangedStart = end;
+    segments.push({ kind: "math", source: entry.token });
+    unchangedStart = entry.end;
   }
 
   segments.push({
@@ -309,79 +391,62 @@ export function protectMath(text) {
 export function restoreMathPreview(text, entries) {
   if (entries.length === 0) return text;
 
+  const entriesByToken = new Map(entries.map((entry) => [entry.token, entry]));
   const output = [];
   let cursor = 0;
-
-  while (cursor < text.length) {
-    let nextPosition = -1;
-    let nextEntry = null;
-
-    for (const entry of entries) {
-      if (entry.token.length === 0) continue;
-      const position = text.indexOf(entry.token, cursor);
-      if (position !== -1 && (nextPosition === -1 || position < nextPosition)) {
-        nextPosition = position;
-        nextEntry = entry;
-      }
-    }
-
-    if (nextEntry === null) break;
-    output.push(text.slice(cursor, nextPosition), nextEntry.source);
-    cursor = nextPosition + nextEntry.token.length;
+  for (const match of findSentinelLikeMatches(text)) {
+    const entry = entriesByToken.get(match.source);
+    if (entry === undefined) continue;
+    output.push(text.slice(cursor, match.start), entry.source);
+    cursor = match.end;
   }
 
   output.push(text.slice(cursor));
   return output.join("");
 }
 
-function findSentinelLikeValues(text) {
-  return findSentinelLikeMatches(text).map(({ source }) => source);
-}
-
-function occurrencePositions(text, token) {
-  const positions = [];
-  let cursor = 0;
-
-  while (cursor <= text.length - token.length) {
-    const position = text.indexOf(token, cursor);
-    if (position === -1) break;
-    positions.push(position);
-    cursor = position + token.length;
-  }
-
-  return positions;
-}
-
 export function restoreMath(text, entries) {
-  const expectedTokens = new Set(entries.map(({ token }) => token));
+  const entriesByToken = new Map(entries.map((entry) => [entry.token, entry]));
+  const counts = new Map(entries.map(({ token }) => [token, 0]));
+  const encountered = [];
 
-  for (const value of findSentinelLikeValues(text)) {
-    if (!expectedTokens.has(value)) {
+  for (const match of findSentinelLikeMatches(text)) {
+    const entry = entriesByToken.get(match.source);
+    if (entry === undefined) {
       return {
         ok: false,
         text,
-        error: `Unexpected or mutated math placeholder: ${value}`,
+        error: `Unexpected or mutated math placeholder: ${match.source}`,
       };
     }
+
+    const count = counts.get(entry.token) + 1;
+    counts.set(entry.token, count);
+    if (count > 1) {
+      return {
+        ok: false,
+        text,
+        error: `Duplicated math placeholder: ${entry.token}`,
+      };
+    }
+    encountered.push({ entry, match });
   }
 
   const protectedEntries = [...entries].sort(
     (left, right) => left.start - right.start,
   );
-  const positions = [];
-  for (const { token } of protectedEntries) {
-    const matches = occurrencePositions(text, token);
-    if (matches.length === 0) {
-      return { ok: false, text, error: `Missing math placeholder: ${token}` };
+  for (const entry of protectedEntries) {
+    if (counts.get(entry.token) === 0) {
+      return {
+        ok: false,
+        text,
+        error: `Missing math placeholder: ${entry.token}`,
+      };
     }
-    if (matches.length > 1) {
-      return { ok: false, text, error: `Duplicated math placeholder: ${token}` };
-    }
-    positions.push(matches[0]);
   }
 
-  for (let index = 1; index < positions.length; index += 1) {
-    if (positions[index] < positions[index - 1]) {
+  for (let index = 0; index < protectedEntries.length; index += 1) {
+    if (encountered[index].entry.token !== protectedEntries[index].token) {
       return {
         ok: false,
         text,
@@ -394,11 +459,9 @@ export function restoreMath(text, entries) {
 
   const output = [];
   let cursor = 0;
-  for (let index = 0; index < protectedEntries.length; index += 1) {
-    const entry = protectedEntries[index];
-    const position = positions[index];
-    output.push(text.slice(cursor, position), entry.source);
-    cursor = position + entry.token.length;
+  for (const { entry, match } of encountered) {
+    output.push(text.slice(cursor, match.start), entry.source);
+    cursor = match.end;
   }
   output.push(text.slice(cursor));
 
