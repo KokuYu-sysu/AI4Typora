@@ -43,13 +43,44 @@ function normalizeAtomicRanges(text, ranges = []) {
   return normalized;
 }
 
+function mergeAtomicRanges(text, ...rangeGroups) {
+  const ranges = rangeGroups
+    .flatMap((group) => normalizeAtomicRanges(text, group))
+    .sort((left, right) => left.start - right.start || right.end - left.end);
+  const merged = [];
+  for (const range of ranges) {
+    const previous = merged.at(-1);
+    if (previous?.start === range.start && previous.end === range.end) continue;
+    if (previous && range.start < previous.end) {
+      throw new RangeError("Atomic ranges must not overlap");
+    }
+    merged.push(range);
+  }
+  return merged;
+}
+
+function atomicToken(text) {
+  return { atomic: true, text };
+}
+
+function tokenText(token) {
+  return typeof token === "string" ? token : token.text;
+}
+
+function tokensEqual(left, right) {
+  if (typeof left === "string" || typeof right === "string") {
+    return typeof left === "string" && typeof right === "string" && left === right;
+  }
+  return left.atomic === true && right.atomic === true && left.text === right.text;
+}
+
 function tokenizeWithRanges(text, locale, ranges) {
   const tokens = [];
   let cursor = 0;
 
   for (const range of normalizeAtomicRanges(text, ranges)) {
     tokens.push(...segmentPlainText(text.slice(cursor, range.start), locale));
-    tokens.push(text.slice(range.start, range.end));
+    tokens.push(atomicToken(text.slice(range.start, range.end)));
     cursor = range.end;
   }
   tokens.push(...segmentPlainText(text.slice(cursor), locale));
@@ -86,14 +117,6 @@ function rangesForAtomicValues(text, values = []) {
   return ranges;
 }
 
-function tokenizeWithAtomicValues(text, locale, atomicValues) {
-  return tokenizeWithRanges(
-    text,
-    locale,
-    rangesForAtomicValues(text, atomicValues),
-  );
-}
-
 export function tokenizeForDiff(text, locale) {
   if (typeof text !== "string") {
     throw new TypeError("Diff text must be a string");
@@ -117,7 +140,7 @@ function diffTokenSequences(before, after, maxMatrixCells) {
   const maxPrefix = Math.min(before.length, after.length);
   while (
     prefixLength < maxPrefix &&
-    before[prefixLength] === after[prefixLength]
+    tokensEqual(before[prefixLength], after[prefixLength])
   ) {
     prefixLength += 1;
   }
@@ -127,7 +150,7 @@ function diffTokenSequences(before, after, maxMatrixCells) {
   while (
     beforeEnd > prefixLength &&
     afterEnd > prefixLength &&
-    before[beforeEnd - 1] === after[afterEnd - 1]
+    tokensEqual(before[beforeEnd - 1], after[afterEnd - 1])
   ) {
     beforeEnd -= 1;
     afterEnd -= 1;
@@ -151,7 +174,7 @@ function diffTokenSequences(before, after, maxMatrixCells) {
       for (let right = afterMiddle.length - 1; right >= 0; right -= 1) {
         const offset = left * columns + right;
         table[offset] =
-          beforeMiddle[left] === afterMiddle[right]
+          tokensEqual(beforeMiddle[left], afterMiddle[right])
             ? table[(left + 1) * columns + right + 1] + 1
             : Math.max(
                 table[(left + 1) * columns + right],
@@ -163,7 +186,7 @@ function diffTokenSequences(before, after, maxMatrixCells) {
     let left = 0;
     let right = 0;
     while (left < beforeMiddle.length && right < afterMiddle.length) {
-      if (beforeMiddle[left] === afterMiddle[right]) {
+      if (tokensEqual(beforeMiddle[left], afterMiddle[right])) {
         appendTokenOperation(operations, "equal", [beforeMiddle[left]]);
         left += 1;
         right += 1;
@@ -190,6 +213,18 @@ function splitLines(text) {
   return text.match(/[^\r\n]+(?:\r\n|\r|\n)?|(?:\r\n|\r|\n)/g) ?? [];
 }
 
+function splitLinesWithRanges(text, ranges) {
+  const tokens = [];
+  let cursor = 0;
+  for (const range of normalizeAtomicRanges(text, ranges)) {
+    tokens.push(...splitLines(text.slice(cursor, range.start)));
+    tokens.push(atomicToken(text.slice(range.start, range.end)));
+    cursor = range.end;
+  }
+  tokens.push(...splitLines(text.slice(cursor)));
+  return tokens;
+}
+
 function appendTextOperation(operations, type, text) {
   if (text.length === 0) return;
   const previous = operations.at(-1);
@@ -201,32 +236,48 @@ function appendTextOperation(operations, type, text) {
 }
 
 function textFromTokenOperation(operation) {
-  return operation.tokens.join("");
+  return operation.tokens.map(tokenText).join("");
 }
 
-function resolveAtomicValues(before, after, options) {
-  const values = Array.isArray(options.atomicValues)
-    ? [...options.atomicValues]
-    : [];
+function resolveAtomicRanges(before, after, options) {
+  const values = Array.isArray(options.atomicValues) ? options.atomicValues : [];
   const rangeOptions = options.atomicRanges;
-  if (rangeOptions === undefined) return values;
-
   const beforeRanges = Array.isArray(rangeOptions)
     ? rangeOptions
     : rangeOptions?.before ?? [];
   const afterRanges = Array.isArray(rangeOptions)
     ? rangeOptions
     : rangeOptions?.after ?? [];
-  for (const range of normalizeAtomicRanges(before, beforeRanges)) {
-    values.push(before.slice(range.start, range.end));
-  }
-  for (const range of normalizeAtomicRanges(after, afterRanges)) {
-    values.push(after.slice(range.start, range.end));
-  }
-  return [...new Set(values)];
+  return {
+    before: mergeAtomicRanges(
+      before,
+      rangesForAtomicValues(before, values),
+      beforeRanges,
+    ),
+    after: mergeAtomicRanges(
+      after,
+      rangesForAtomicValues(after, values),
+      afterRanges,
+    ),
+  };
 }
 
-function refineChangedLines(lineOperations, options, atomicValues) {
+function flattenTokens(tokens) {
+  const textParts = [];
+  const ranges = [];
+  let offset = 0;
+  for (const token of tokens) {
+    const text = tokenText(token);
+    textParts.push(text);
+    if (typeof token !== "string" && token.atomic === true) {
+      ranges.push({ start: offset, end: offset + text.length });
+    }
+    offset += text.length;
+  }
+  return { text: textParts.join(""), ranges };
+}
+
+function refineChangedLines(lineOperations, options) {
   const output = [];
   let index = 0;
   while (index < lineOperations.length) {
@@ -237,18 +288,25 @@ function refineChangedLines(lineOperations, options, atomicValues) {
       continue;
     }
 
-    let beforeText = "";
-    let afterText = "";
+    const beforeTokens = [];
+    const afterTokens = [];
     while (index < lineOperations.length && lineOperations[index].type !== "equal") {
       const changed = lineOperations[index];
-      if (changed.type === "delete") beforeText += textFromTokenOperation(changed);
-      if (changed.type === "insert") afterText += textFromTokenOperation(changed);
+      if (changed.type === "delete") beforeTokens.push(...changed.tokens);
+      if (changed.type === "insert") afterTokens.push(...changed.tokens);
       index += 1;
     }
 
+    const beforeChange = flattenTokens(beforeTokens);
+    const afterChange = flattenTokens(afterTokens);
+
     const wordOperations = diffTokenSequences(
-      tokenizeWithAtomicValues(beforeText, options.locale, atomicValues),
-      tokenizeWithAtomicValues(afterText, options.locale, atomicValues),
+      tokenizeWithRanges(
+        beforeChange.text,
+        options.locale,
+        beforeChange.ranges,
+      ),
+      tokenizeWithRanges(afterChange.text, options.locale, afterChange.ranges),
       options.maxMatrixCells,
     );
     for (const wordOperation of wordOperations) {
@@ -275,16 +333,13 @@ export function buildTextDiff(before, after, options = {}) {
     locale: options.locale,
     maxMatrixCells: requestedLimit,
   };
+  const atomicRanges = resolveAtomicRanges(before, after, options);
   const lineOperations = diffTokenSequences(
-    splitLines(before),
-    splitLines(after),
+    splitLinesWithRanges(before, atomicRanges.before),
+    splitLinesWithRanges(after, atomicRanges.after),
     normalizedOptions.maxMatrixCells,
   );
-  return refineChangedLines(
-    lineOperations,
-    normalizedOptions,
-    resolveAtomicValues(before, after, options),
-  );
+  return refineChangedLines(lineOperations, normalizedOptions);
 }
 
 export function reconstructDiff(operations, side) {

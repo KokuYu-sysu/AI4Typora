@@ -120,6 +120,76 @@ test("atomic ranges are respected by the tokenizer used for each side", () => {
   );
 });
 
+test("an unchanged multiline display formula stays whole inside one operation", () => {
+  const formula = "$$\nA + B\n$$";
+  const operations = assertReconstructable(
+    `Old wording before ${formula} after.`,
+    `New wording before ${formula} after.`,
+    { atomicValues: [formula] },
+  );
+
+  assert.equal(
+    operations.filter(({ text }) => text.includes(formula)).length,
+    1,
+  );
+  assert.equal(
+    operations
+      .filter(({ text }) => text.includes("A + B"))
+      .map(({ text }) => text.includes(formula))
+      .every(Boolean),
+    true,
+  );
+});
+
+test("changed multiline display formulas are complete delete and insert operations", () => {
+  const beforeFormula = "$$\nA + B\n$$";
+  const afterFormula = "$$\nC + D\n$$";
+  const operations = assertReconstructable(
+    `value ${beforeFormula} end`,
+    `value ${afterFormula} end`,
+    { atomicValues: [beforeFormula, afterFormula] },
+  );
+
+  assert.ok(
+    operations.some(
+      ({ type, text }) => type === "delete" && text === beforeFormula,
+    ),
+  );
+  assert.ok(
+    operations.some(
+      ({ type, text }) => type === "insert" && text === afterFormula,
+    ),
+  );
+});
+
+test("an explicit atomic range does not make an equal value atomic elsewhere", () => {
+  const before = "A + B\nA + B";
+  const after = "C + D\nC + D";
+  const operations = assertReconstructable(before, after, {
+    atomicRanges: {
+      before: [{ start: 0, end: 5 }],
+      after: [{ start: 0, end: 5 }],
+    },
+  });
+
+  assert.ok(
+    operations.some(
+      ({ type, text }) => type === "delete" && text === "A + B",
+    ),
+  );
+  assert.ok(
+    operations.some(
+      ({ type, text }) => type === "insert" && text === "C + D",
+    ),
+  );
+  assert.ok(
+    operations.some(
+      ({ type, text }) => type === "delete" && (text === "A" || text === "B"),
+    ),
+    "the second occurrence should still receive word-level refinement",
+  );
+});
+
 test("large token matrices use a deterministic delete-insert fallback", () => {
   const before = "a b c d e";
   const after = "1 2 3 4 5";
