@@ -141,7 +141,7 @@ function makeDialogDraggable(overlay) {
   const dialog = overlay.querySelector(".ai-edit-dialog");
   const header = overlay.querySelector(".ai-edit-dialog-header");
   if (!dialog || !header) {
-    return;
+    return () => {};
   }
 
   header.classList.add("draggable");
@@ -150,6 +150,17 @@ function makeDialogDraggable(overlay) {
   let startY = 0;
   let startLeft = 0;
   let startTop = 0;
+  let disposed = false;
+  let documentListenersAttached = false;
+
+  function removeDocumentListeners() {
+    if (!documentListenersAttached) {
+      return;
+    }
+    documentListenersAttached = false;
+    document.removeEventListener("mousemove", onMove, true);
+    document.removeEventListener("mouseup", onUp, true);
+  }
 
   function toFixedPosition() {
     if (dialog.dataset.fixedPosition === "1") {
@@ -178,11 +189,13 @@ function makeDialogDraggable(overlay) {
 
   function onUp() {
     dragging = false;
-    document.removeEventListener("mousemove", onMove, true);
-    document.removeEventListener("mouseup", onUp, true);
+    removeDocumentListeners();
   }
 
-  header.addEventListener("mousedown", (event) => {
+  function onDown(event) {
+    if (disposed) {
+      return;
+    }
     if (event.button !== 0) {
       return;
     }
@@ -197,9 +210,24 @@ function makeDialogDraggable(overlay) {
     startY = event.clientY;
     startLeft = rect.left;
     startTop = rect.top;
+    if (documentListenersAttached) {
+      return;
+    }
+    documentListenersAttached = true;
     document.addEventListener("mousemove", onMove, true);
     document.addEventListener("mouseup", onUp, true);
-  });
+  }
+
+  header.addEventListener("mousedown", onDown);
+  return () => {
+    if (disposed) {
+      return;
+    }
+    disposed = true;
+    dragging = false;
+    removeDocumentListeners();
+    header.removeEventListener("mousedown", onDown);
+  };
 }
 
 export function closeAnyDialog(reason = "superseded") {
@@ -234,6 +262,7 @@ export function promptForText(options) {
       </div>
     `;
     document.body.appendChild(overlay);
+    const disposeDrag = makeDialogDraggable(overlay);
 
     const input = overlay.querySelector("#ai-edit-dialog-input");
     input.value = options.initialValue || "";
@@ -250,6 +279,7 @@ export function promptForText(options) {
         return;
       }
       finished = true;
+      disposeDrag();
       closeOverlay(overlay);
       clearActiveDialog(dialog);
       resolve(value);
@@ -295,7 +325,7 @@ export function createStreamDialog(options) {
     </div>
   `;
   document.body.appendChild(overlay);
-  makeDialogDraggable(overlay);
+  const disposeDrag = makeDialogDraggable(overlay);
 
   const output = overlay.querySelector("#ai-edit-stream-output");
   const footer = overlay.querySelector("#ai-edit-stream-footer");
@@ -376,6 +406,7 @@ export function createStreamDialog(options) {
     }
     closed = true;
     document.removeEventListener("keydown", onDialogKeyDown, true);
+    disposeDrag();
     closeOverlay(overlay);
     clearActiveDialog(dialog);
     emitClose(reason);

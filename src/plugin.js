@@ -395,7 +395,7 @@ export default class AiEditPlugin extends Plugin {
         messages: [{ role: "user", content: userPrompt }],
         settings,
         onChunk: (chunk) => {
-          if (closed) {
+          if (closed || stopped) {
             return;
           }
           rawOutput += chunk;
@@ -406,7 +406,7 @@ export default class AiEditPlugin extends Plugin {
           );
         },
         onAttemptStart: ({ resetOutput }) => {
-          if (!closed && resetOutput) {
+          if (!closed && !stopped && resetOutput) {
             rawOutput = "";
             stream.setValue("");
           }
@@ -418,7 +418,7 @@ export default class AiEditPlugin extends Plugin {
         activeRequest = null;
       }
       generating = false;
-      if (closed) {
+      if (closed || stopped) {
         return;
       }
       if (!result.trim()) {
@@ -500,15 +500,18 @@ export default class AiEditPlugin extends Plugin {
 
     let activeRequest = null;
     let generating = true;
+    let stopped = false;
     let closed = false;
 
     const stream = createStreamDialog({
       title: "AI Q&A",
       waitingText: "Waiting for AI response...",
       onStop: () => {
-        if (generating) {
-          activeRequest?.abort();
+        if (!generating || stopped) {
+          return;
         }
+        stopped = true;
+        activeRequest?.abort();
       },
       onClose: (meta) => {
         closed = true;
@@ -527,8 +530,13 @@ export default class AiEditPlugin extends Plugin {
         messages: [{ role: "user", content: userPrompt }],
         settings,
         onChunk: (chunk) => {
-          if (!closed) {
+          if (!closed && !stopped) {
             stream.append(chunk);
+          }
+        },
+        onAttemptStart: ({ resetOutput }) => {
+          if (!closed && !stopped && resetOutput) {
+            stream.setValue("");
           }
         },
       });
@@ -538,7 +546,7 @@ export default class AiEditPlugin extends Plugin {
         activeRequest = null;
       }
       generating = false;
-      if (closed) {
+      if (closed || stopped) {
         return;
       }
       if (!result.trim()) {
@@ -609,15 +617,18 @@ export default class AiEditPlugin extends Plugin {
 
     let activeRequest = null;
     let generating = true;
+    let stopped = false;
     let closed = false;
 
     const stream = createStreamDialog({
       title: "AI Image Q&A",
       waitingText: "Waiting for AI response...",
       onStop: () => {
-        if (generating) {
-          activeRequest?.abort();
+        if (!generating || stopped) {
+          return;
         }
+        stopped = true;
+        activeRequest?.abort();
       },
       onClose: (meta) => {
         closed = true;
@@ -636,8 +647,13 @@ export default class AiEditPlugin extends Plugin {
         messages: [{ role: "user", content: userPrompt, imageInput }],
         settings,
         onChunk: (chunk) => {
-          if (!closed) {
+          if (!closed && !stopped) {
             stream.append(chunk);
+          }
+        },
+        onAttemptStart: ({ resetOutput }) => {
+          if (!closed && !stopped && resetOutput) {
+            stream.setValue("");
           }
         },
       });
@@ -647,7 +663,7 @@ export default class AiEditPlugin extends Plugin {
         activeRequest = null;
       }
       generating = false;
-      if (closed) {
+      if (closed || stopped) {
         return;
       }
       if (!result.trim()) {

@@ -40,14 +40,17 @@
         this.insertionRange = null;
       }
       const node = selection && (selection.focusNode || selection.anchorNode);
-      this.captureInsertionTargetFromNode(node);
+      this.captureInsertionTargetFromNode(node, { preserveInsertionRange: true });
     } catch (_) {
       this.insertTarget = null;
       this.insertionRange = null;
     }
   }
 
-  captureInsertionTargetFromNode(node) {
+  captureInsertionTargetFromNode(node, options = {}) {
+    if (!options.preserveInsertionRange) {
+      this.insertionRange = null;
+    }
     try {
       const element = node && (node.nodeType === 1 ? node : node.parentElement);
       const cidBlock = element && element.closest ? element.closest("[cid]") : null;

@@ -48,12 +48,13 @@ class FakeElement {
     this.children = [];
     if (html.includes('id="ai-edit-dialog-input"')) {
       const dialog = this.document.createElement("div"); dialog.className = "ai-edit-dialog";
+      const header = this.document.createElement("div"); header.className = "ai-edit-dialog-header";
       const input = this.document.createElement("textarea"); input.id = "ai-edit-dialog-input";
       const footer = this.document.createElement("div");
       const cancel = this.document.createElement("button"); cancel.dataset.action = "cancel";
       const confirm = this.document.createElement("button"); confirm.dataset.action = "confirm";
       footer.appendChild(cancel); footer.appendChild(confirm);
-      dialog.appendChild(input); dialog.appendChild(footer); this.appendChild(dialog);
+      dialog.appendChild(header); dialog.appendChild(input); dialog.appendChild(footer); this.appendChild(dialog);
       return;
     }
     if (html.includes("ai-edit-stream-output")) {
@@ -97,21 +98,38 @@ class FakeElement {
 function installFakeDom() {
   const keyListeners = new Set();
   let keydownRemoveCount = 0;
+  const dragListeners = {
+    mousemove: new Set(),
+    mouseup: new Set(),
+  };
+  const dragRemoveCounts = {
+    mousemove: 0,
+    mouseup: 0,
+  };
   const document = {
     body: null,
     createElement(tagName) { return new FakeElement(tagName, document); },
     querySelector(selector) { return document.body.querySelector(selector); },
     getElementById(id) { return document.querySelector(`#${id}`); },
-    addEventListener(type, listener) { if (type === "keydown") keyListeners.add(listener); },
+    addEventListener(type, listener) {
+      if (type === "keydown") keyListeners.add(listener);
+      if (dragListeners[type]) dragListeners[type].add(listener);
+    },
     removeEventListener(type, listener) {
       if (type === "keydown") {
         keydownRemoveCount += 1;
         keyListeners.delete(listener);
       }
+      if (dragListeners[type]) {
+        dragRemoveCounts[type] += 1;
+        dragListeners[type].delete(listener);
+      }
     },
     fireKey(event) { for (const listener of keyListeners) listener(event); },
     getKeydownListenerCount() { return keyListeners.size; },
     getKeydownRemoveCount() { return keydownRemoveCount; },
+    getDragListenerCount(type) { return dragListeners[type].size; },
+    getDragRemoveCount(type) { return dragRemoveCounts[type]; },
   };
   document.body = new FakeElement("body", document);
   globalThis.document = document;
@@ -148,6 +166,31 @@ function sseResponse(events) {
         controller.close();
       },
     }),
+  };
+}
+
+function abortIgnoringStreamResponse(initialText) {
+  let controller;
+  const response = {
+    ok: true,
+    status: 200,
+    body: new ReadableStream({
+      start(streamController) {
+        controller = streamController;
+        streamController.enqueue(new TextEncoder().encode(
+          `data: ${JSON.stringify({ choices: [{ delta: { content: initialText } }] })}\n\n`,
+        ));
+      },
+    }),
+  };
+  return {
+    response,
+    resolveLate(text) {
+      controller.enqueue(new TextEncoder().encode(
+        `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`,
+      ));
+      controller.close();
+    },
   };
 }
 
@@ -316,6 +359,36 @@ test("stopped optimize flow never replaces a partial response", async () => {
   }
 });
 
+test("stopping optimize freezes pre-stop output when an abort-ignoring provider completes late", async () => {
+  const document = installFakeDom();
+  const originalFetch = globalThis.fetch;
+  const plugin = createOptimizePlugin("Selected");
+  let request;
+  globalThis.fetch = () => {
+    request = abortIgnoringStreamResponse("pre-stop optimize");
+    return request.response;
+  };
+
+  try {
+    const flow = plugin.openOptimizeFlow(false);
+    completePrompt(document);
+    await new Promise((resolve) => setImmediate(resolve));
+    const overlay = document.getElementById("ai-edit-dialog-overlay");
+    assert.equal(document.getElementById("ai-edit-stream-output").value, "pre-stop optimize");
+    overlay.listeners.get("click")({ target: findAction(overlay, "stop") });
+    request.resolveLate(" late optimize");
+    await flow;
+
+    const output = document.getElementById("ai-edit-stream-output");
+    const footer = document.getElementById("ai-edit-stream-footer");
+    assert.equal(output.value, "pre-stop optimize");
+    assert.equal(findAction(footer, "confirm"), null);
+    assert.deepEqual(plugin.editorSelection.replaced, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("failover clears primary partial output before rendering backup output", async () => {
   const document = installFakeDom();
   const originalFetch = globalThis.fetch;
@@ -410,6 +483,85 @@ test("closing a dialog is idempotent and a stale close cannot clear a newer dial
   assert.equal(secondCloseCount, 1);
 });
 
+test("closing a stream dialog during drag removes drag listeners once", () => {
+  closeAnyDialog("test cleanup");
+  const document = installFakeDom();
+  const stream = createStreamDialog({ title: "Drag me" });
+  const header = document.querySelector(".ai-edit-dialog-header");
+  header.listeners.get("mousedown")({
+    button: 0,
+    target: { closest() { return null; } },
+    clientX: 10,
+    clientY: 10,
+    preventDefault() {},
+  });
+  assert.equal(document.getDragListenerCount("mousemove"), 1);
+  assert.equal(document.getDragListenerCount("mouseup"), 1);
+
+  stream.close();
+  stream.close();
+
+  assert.equal(document.getDragListenerCount("mousemove"), 0);
+  assert.equal(document.getDragListenerCount("mouseup"), 0);
+  assert.equal(document.getDragRemoveCount("mousemove"), 1);
+  assert.equal(document.getDragRemoveCount("mouseup"), 1);
+});
+
+test("closing a prompt dialog during drag removes drag listeners once", () => {
+  closeAnyDialog("test cleanup");
+  const document = installFakeDom();
+  const prompt = promptForText({ title: "Prompt", label: "Value" });
+  const onDown = document.querySelector(".ai-edit-dialog-header").listeners.get("mousedown");
+  assert.equal(typeof onDown, "function");
+  onDown({
+    button: 0,
+    target: { closest() { return null; } },
+    clientX: 10,
+    clientY: 10,
+    preventDefault() {},
+  });
+  closeAnyDialog("close prompt");
+
+  assert.equal(document.getDragListenerCount("mousemove"), 0);
+  assert.equal(document.getDragListenerCount("mouseup"), 0);
+  assert.equal(document.getDragRemoveCount("mousemove"), 1);
+  assert.equal(document.getDragRemoveCount("mouseup"), 1);
+  void prompt;
+});
+
+test("superseding a dragged dialog cleans only its own listeners", () => {
+  closeAnyDialog("test cleanup");
+  const document = installFakeDom();
+  const first = createStreamDialog({ title: "First" });
+  document.querySelector(".ai-edit-dialog-header").listeners.get("mousedown")({
+    button: 0,
+    target: { closest() { return null; } },
+    clientX: 10,
+    clientY: 10,
+    preventDefault() {},
+  });
+  const second = createStreamDialog({ title: "Second" });
+  assert.equal(document.getDragRemoveCount("mousemove"), 1);
+  assert.equal(document.getDragRemoveCount("mouseup"), 1);
+
+  document.querySelector(".ai-edit-dialog-header").listeners.get("mousedown")({
+    button: 0,
+    target: { closest() { return null; } },
+    clientX: 20,
+    clientY: 20,
+    preventDefault() {},
+  });
+  first.close();
+  assert.equal(document.getDragListenerCount("mousemove"), 1);
+  assert.equal(document.getDragListenerCount("mouseup"), 1);
+
+  second.close();
+  assert.equal(document.getDragListenerCount("mousemove"), 0);
+  assert.equal(document.getDragListenerCount("mouseup"), 0);
+  assert.equal(document.getDragRemoveCount("mousemove"), 2);
+  assert.equal(document.getDragRemoveCount("mouseup"), 2);
+});
+
 test("closing a slow text Q&A dialog aborts its request and ignores late output", async () => {
   closeAnyDialog("test cleanup");
   const document = installFakeDom();
@@ -431,6 +583,36 @@ test("closing a slow text Q&A dialog aborts its request and ignores late output"
     await flow;
     assert.equal(document.getElementById("ai-edit-dialog-overlay"), null);
     assert.equal(plugin.editorSelection.restoreInsertionCaretCalls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("stopping text Q&A freezes pre-stop output when an abort-ignoring provider completes late", async () => {
+  closeAnyDialog("test cleanup");
+  const document = installFakeDom();
+  const originalFetch = globalThis.fetch;
+  const plugin = createQaPlugin();
+  let request;
+  globalThis.fetch = () => {
+    request = abortIgnoringStreamResponse("pre-stop text answer");
+    return request.response;
+  };
+
+  try {
+    const flow = plugin.openQaFlow();
+    await completeTextQaPrompts(document);
+    await new Promise((resolve) => setImmediate(resolve));
+    const overlay = document.getElementById("ai-edit-dialog-overlay");
+    assert.equal(document.getElementById("ai-edit-stream-output").value, "pre-stop text answer");
+    overlay.listeners.get("click")({ target: findAction(overlay, "stop") });
+    request.resolveLate(" late text answer");
+    await flow;
+
+    const output = document.getElementById("ai-edit-stream-output");
+    const footer = document.getElementById("ai-edit-stream-footer");
+    assert.equal(output.value, "pre-stop text answer");
+    assert.equal(findAction(footer, "confirm"), null);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -460,6 +642,36 @@ test("closing a slow image Q&A dialog aborts its request and ignores late output
     await flow;
     assert.equal(document.getElementById("ai-edit-dialog-overlay"), null);
     assert.equal(plugin.editorSelection.restoreInsertionCaretCalls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("stopping image Q&A freezes pre-stop output when an abort-ignoring provider completes late", async () => {
+  closeAnyDialog("test cleanup");
+  const document = installFakeDom();
+  const originalFetch = globalThis.fetch;
+  const plugin = createQaPlugin();
+  let request;
+  globalThis.fetch = () => {
+    request = abortIgnoringStreamResponse("pre-stop image answer");
+    return request.response;
+  };
+
+  try {
+    const flow = plugin.openImageQaFlow({ src: "https://example.com/figure.png" });
+    completePrompt(document, "What does this show?");
+    await new Promise((resolve) => setImmediate(resolve));
+    const overlay = document.getElementById("ai-edit-dialog-overlay");
+    assert.equal(document.getElementById("ai-edit-stream-output").value, "pre-stop image answer");
+    overlay.listeners.get("click")({ target: findAction(overlay, "stop") });
+    request.resolveLate(" late image answer");
+    await flow;
+
+    const output = document.getElementById("ai-edit-stream-output");
+    const footer = document.getElementById("ai-edit-stream-footer");
+    assert.equal(output.value, "pre-stop image answer");
+    assert.equal(findAction(footer, "confirm"), null);
   } finally {
     globalThis.fetch = originalFetch;
   }
