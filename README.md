@@ -15,8 +15,8 @@ This Windows port focuses on a stable writing workflow:
 
 Included: 
 
-- `AI Optimize (With Selection only)`
-- `AI Optimize (With Full Context)`
+- `AI Optimize (Selection Only)`
+- `AI Optimize (Use Full Document Context)`
 - `AI Q&A` via `Ctrl + E` (Support Image in Version 1.4.0)
 - settings page inside Typora Community Plugins
 - Select the model supported
@@ -84,7 +84,7 @@ This mode reads an existing OAuth token file from your local machine.
 
 OR
 
-Click `OAuth Login`and `Download user Info` to connect OpenAI and Typora
+Click `OAuth Login` and `Download user Info` to connect OpenAI and Typora.
 
 Auto-detect order:
 
@@ -106,6 +106,10 @@ This mode uses:
 
 You can point it to OpenAI-compatible gateways or self-hosted backends. Version 1.3.0 supports an alternative approach that enables the use of other OpenAI-compatible AI models, such as DeepSeek, and requires an `api_key` and `base_url`.
 
+Automatic failover is controlled by `Enable automatic fallback to backup API
+connections`. Configure the optional `Backup API 1` and `Backup API 2` URL,
+key, and model settings in this provider section.
+
 ![](https://github.com/KokuYu-sysu/typora-gpt-edit/blob/main/asset/AlterAPI.png?raw=true)
 
 ## Usage
@@ -115,16 +119,17 @@ You can point it to OpenAI-compatible gateways or self-hosted backends. Version 
 1. Select text in the editor
 2. Right-click
 3. Choose one of:
-   - `AI Optimize Selection`
-   - `AI Optimize (With Context)`
+   - `AI Optimize (Selection Only)`
+   - `AI Optimize (Use Full Document Context)`
 
 The plugin will show a result dialog. You can confirm to replace the selection.
 
 Responses are rendered incrementally as they arrive for both ChatGPT OAuth and
-OpenAI-compatible providers. The result dialog keeps the generated text
-viewable and copyable while it is being completed. If you stop generation, or
-if context-rewrite formula validation fails, the partial/candidate text remains
-available for copying but the `Replace` action is disabled.
+OpenAI-compatible providers. The result dialog shows the generated text while
+it is being completed; its Copy action is available after generation completes,
+after you stop generation, or after validation fails. If you stop generation,
+or if context-rewrite formula validation fails, the partial/candidate text
+remains available for copying but the `Replace` action is disabled.
 
 ![rightclick.png](https://github.com/KokuYu-sysu/typora-gpt-edit/blob/main/asset/rightclick.png?raw=true)
 
@@ -134,7 +139,7 @@ And it will return the revise suggestion, click `Replace` to do that:
 ### Ask writing questions
 
 1. Place the cursor in the editor without selecting text
-2. Press `Ctrl + E`OR Right click in the menu to find `AI Q&A`
+2. Press `Ctrl + E` or right-click in the menu to find `AI Q&A`.
 3. Enter your question
 4. Optionally type `YES` to include the full document as context
 
@@ -169,13 +174,15 @@ Output: you can insert the answer to your file or copy it.
 
 ### Context-aware rewrite and formulas
 
-`AI Optimize (With Context)` protects formulas outside inline and fenced code
-before sending the request. It recognizes `$...$`, `$$...$$`, `\(...\)`, and
-`\[...\]`, then restores the original formula text after generation. The
-candidate is checked before replacement: every exact formula placeholder must
-appear once and in its original order. Missing, duplicated, mutated, or
-reordered placeholders disable `Replace` while leaving the candidate visible
-and copyable.
+`AI Optimize (Use Full Document Context)` protects formulas in the selected
+passage being rewritten, except formulas inside inline and fenced code, before
+sending the request. It recognizes `$...$`, `$$...$$`, `\(...\)`, and `\[...\]`,
+then restores the original formula text after generation. The full document is
+provided as unchanged context; it is not itself transformed or protected for
+replacement. The candidate is checked before replacement: every exact formula
+placeholder must appear once and in its original order. Missing, duplicated,
+mutated, or reordered placeholders disable `Replace` while leaving the
+candidate visible and copyable.
 
 When OpenAI-compatible failover is enabled, a failed connection's partial
 stream is cleared before the next provider attempt is displayed, so outputs
@@ -185,11 +192,11 @@ from different attempts are never concatenated.
 
 | Shortcut Key       | Function                                     |
 | ------------------ | -------------------------------------------- |
-| `Ctrl + E`         | `AI Q&A`when no text is selected             |
+| `Ctrl + E`         | `AI Q&A` when no text is selected            |
 | `Ctrl + R`         | `AI Optimize (Selection Only)`               |
-| `Ctrl + Shift + R` | `AI Optimize (With context)`                 |
-| `Ctrl + C`         | `Copy`content in the output window and close |
-| `Ctrl + Enter`     | `Replace/Insert`with the response            |
+| `Ctrl + Shift + R` | `AI Optimize (Use Full Document Context)`    |
+| `Ctrl + C`         | `Copy` content in the output window and close |
+| `Ctrl + Enter`     | `Replace/Insert` with the response           |
 
 ## Development notes
 
@@ -213,9 +220,9 @@ Main files:
 
 ## Known limitations
 
-- This project is currently tested for Windows-oriented community-plugin usage, for macOS: Please View: https://github.com/Aurisper/typora-ai-edit.
+- This project is currently tested for Windows-oriented community-plugin usage. For macOS, see [Aurisper/typora-ai-edit](https://github.com/Aurisper/typora-ai-edit).
 - The plugin depends on Typora Community Plugin Framework internals.
-- The default prompt is set as Chinese, for English or other language document should revise the prompt by user. And you can also revise the prompt to make it more suitable to you.
+- Browser locale selects the Chinese or English defaults, and all prompts can be edited to suit your document and workflow.
 
 ## Publish package
 
@@ -229,7 +236,7 @@ Place that folder inside their Typora community plugin `plugins` directory.
 
 ## Acknowledge
 
-In developing and implementing this project, I used another project, https://github.com/Aurisper/typora-ai-edit, as a reference and made revisions based on it. Therefore, I would like to express my sincere thanks to its contributor.
+In developing and implementing this project, I used [Aurisper/typora-ai-edit](https://github.com/Aurisper/typora-ai-edit) as a reference and made revisions based on it. Therefore, I would like to express my sincere thanks to its contributor.
 
 ## Updated history
 
@@ -238,11 +245,11 @@ In developing and implementing this project, I used another project, https://git
 - Version 1.2.0: Fixed login-related issues and added prompt import/export support for easier migration.
 - Version 1.3.0: Support an OpenAI-compatible method for using typora-ai-edit plugin.
 - Version 1.4.0: Support AI Q&A to image
-- Unreleased Phase 1: Added incremental streaming for both providers, a
+- Unreleased (Phase 1): Added incremental streaming for both providers, a
   senior-linguistics-expert/professional-editor default persona while
   preserving custom prompts, context-aware formula protection and exact
   placeholder validation, copyable partial results with replacement disabled
-  after stop/validation failure, and clean partial-output reset during provider
+  after stop/validation failure, and clears partial output during provider
   failover.
 
 ## License
