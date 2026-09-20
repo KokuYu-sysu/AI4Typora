@@ -1,6 +1,9 @@
 const TOKEN_PREFIX = "⟪AI_EDIT_MATH_";
 const TOKEN_SUFFIX = "⟫";
-const LITERAL_ENTRIES = Symbol("mathProtectionLiteralEntries");
+
+function mathToken(index) {
+  return `${TOKEN_PREFIX}${index}${TOKEN_SUFFIX}`;
+}
 
 function sentinelLikePattern() {
   return /⟪AI_EDIT_MATH_[^⟫\r\n]*⟫|⟪AI_EDIT_MATH_[^\s]*|AI_EDIT_MATH_[A-Za-z0-9_-]+/g;
@@ -12,24 +15,6 @@ function findSentinelLikeMatches(text) {
     start: match.index,
     end: match.index + match[0].length,
   }));
-}
-
-function literalPlaceholder(namespace, index) {
-  return `\uE000AIEL:${namespace}:${index}\uE001`;
-}
-
-function chooseLiteralNamespace(text, count) {
-  let namespace = 0;
-
-  while (
-    Array.from({ length: count }, (_, index) =>
-      text.includes(literalPlaceholder(namespace, index)),
-    ).some(Boolean)
-  ) {
-    namespace += 1;
-  }
-
-  return namespace;
 }
 
 function isEscaped(text, index) {
@@ -219,7 +204,7 @@ function mathEndAt(text, start) {
 }
 
 export function protectMath(text) {
-  const entries = [];
+  const formulaEntries = [];
   const segments = [];
   let cursor = 0;
   let unchangedStart = 0;
@@ -252,7 +237,7 @@ export function protectMath(text) {
       continue;
     }
 
-    const token = `${TOKEN_PREFIX}${entries.length}${TOKEN_SUFFIX}`;
+    const token = mathToken(formulaEntries.length);
     const source = text.slice(cursor, end);
     segments.push({
       kind: "text",
@@ -260,7 +245,7 @@ export function protectMath(text) {
       start: unchangedStart,
     });
     segments.push({ kind: "math", source: token });
-    entries.push({ token, source, start: cursor, end });
+    formulaEntries.push({ token, source, start: cursor, end });
     cursor = end;
     unchangedStart = end;
   }
@@ -276,13 +261,17 @@ export function protectMath(text) {
     (count, segment) => count + findSentinelLikeMatches(segment.source).length,
     0,
   );
-  if (entries.length === 0 && literalCount === 0) {
-    return { protectedText: text, entries };
+  if (formulaEntries.length === 0 && literalCount === 0) {
+    return { protectedText: text, entries: formulaEntries };
   }
 
-  const namespace = chooseLiteralNamespace(text, literalCount);
+  const unavailableTokens = new Set([
+    ...formulaEntries.map(({ token }) => token),
+    ...findSentinelLikeMatches(text).map(({ source }) => source),
+  ]);
   const literalEntries = [];
   const output = [];
+  let nextLiteralIndex = formulaEntries.length;
 
   for (const segment of segments) {
     if (segment.kind === "math") {
@@ -292,7 +281,13 @@ export function protectMath(text) {
 
     let localCursor = 0;
     for (const match of findSentinelLikeMatches(segment.source)) {
-      const token = literalPlaceholder(namespace, literalEntries.length);
+      let token = mathToken(nextLiteralIndex);
+      while (unavailableTokens.has(token)) {
+        nextLiteralIndex += 1;
+        token = mathToken(nextLiteralIndex);
+      }
+      nextLiteralIndex += 1;
+      unavailableTokens.add(token);
       output.push(segment.source.slice(localCursor, match.start), token);
       literalEntries.push({
         token,
@@ -305,19 +300,14 @@ export function protectMath(text) {
     output.push(segment.source.slice(localCursor));
   }
 
-  Object.defineProperty(entries, LITERAL_ENTRIES, {
-    value: literalEntries,
-  });
+  const entries = [...formulaEntries, ...literalEntries].sort(
+    (left, right) => left.start - right.start,
+  );
   return { protectedText: output.join(""), entries };
 }
 
-function restorationEntries(entries) {
-  return [...entries, ...(entries[LITERAL_ENTRIES] ?? [])];
-}
-
 export function restoreMathPreview(text, entries) {
-  const replacements = restorationEntries(entries);
-  if (replacements.length === 0) return text;
+  if (entries.length === 0) return text;
 
   const output = [];
   let cursor = 0;
@@ -326,7 +316,7 @@ export function restoreMathPreview(text, entries) {
     let nextPosition = -1;
     let nextEntry = null;
 
-    for (const entry of replacements) {
+    for (const entry of entries) {
       if (entry.token.length === 0) continue;
       const position = text.indexOf(entry.token, cursor);
       if (position !== -1 && (nextPosition === -1 || position < nextPosition)) {
@@ -375,23 +365,17 @@ export function restoreMath(text, entries) {
     }
   }
 
-  const protectedEntries = restorationEntries(entries).sort(
+  const protectedEntries = [...entries].sort(
     (left, right) => left.start - right.start,
   );
   const positions = [];
   for (const { token } of protectedEntries) {
     const matches = occurrencePositions(text, token);
     if (matches.length === 0) {
-      const category = expectedTokens.has(token) ? "math" : "original text";
-      return { ok: false, text, error: `Missing ${category} placeholder: ${token}` };
+      return { ok: false, text, error: `Missing math placeholder: ${token}` };
     }
     if (matches.length > 1) {
-      const category = expectedTokens.has(token) ? "math" : "original text";
-      return {
-        ok: false,
-        text,
-        error: `Duplicated ${category} placeholder: ${token}`,
-      };
+      return { ok: false, text, error: `Duplicated math placeholder: ${token}` };
     }
     positions.push(matches[0]);
   }

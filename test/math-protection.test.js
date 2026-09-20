@@ -198,14 +198,19 @@ test("round-trips an original literal that collides with the first math token", 
 
 test("round-trips repeated and differently indexed literal sentinels around formulas", () => {
   const input =
-    "⟪AI_EDIT_MATH_0⟫ before $a$ ⟪AI_EDIT_MATH_0⟫ between ⟪AI_EDIT_MATH_1⟫ $b$ after ⟪AI_EDIT_MATH_99⟫";
+    "⟪AI_EDIT_MATH_0⟫ before $a$ ⟪AI_EDIT_MATH_0⟫ between ⟪AI_EDIT_MATH_1⟫ and ⟪AI_EDIT_MATH_2⟫ $b$ after ⟪AI_EDIT_MATH_99⟫";
   const result = protectMath(input);
 
   assert.deepEqual(
     result.entries.map(({ token, source }) => ({ token, source })),
     [
+      { token: "⟪AI_EDIT_MATH_3⟫", source: "⟪AI_EDIT_MATH_0⟫" },
       { token: "⟪AI_EDIT_MATH_0⟫", source: "$a$" },
+      { token: "⟪AI_EDIT_MATH_4⟫", source: "⟪AI_EDIT_MATH_0⟫" },
+      { token: "⟪AI_EDIT_MATH_5⟫", source: "⟪AI_EDIT_MATH_1⟫" },
+      { token: "⟪AI_EDIT_MATH_6⟫", source: "⟪AI_EDIT_MATH_2⟫" },
       { token: "⟪AI_EDIT_MATH_1⟫", source: "$b$" },
+      { token: "⟪AI_EDIT_MATH_7⟫", source: "⟪AI_EDIT_MATH_99⟫" },
     ],
   );
   assert.equal(restoreMathPreview(result.protectedText, result.entries), input);
@@ -226,12 +231,64 @@ test("literal-only sentinel text round-trips with no formula entries", () => {
   const input = "literal ⟪AI_EDIT_MATH_0⟫ and ⟪AI_EDIT_MATH_custom⟫";
   const result = protectMath(input);
 
-  assert.deepEqual(result.entries, []);
+  assert.deepEqual(result.entries, [
+    {
+      token: "⟪AI_EDIT_MATH_1⟫",
+      source: "⟪AI_EDIT_MATH_0⟫",
+      start: 8,
+      end: 24,
+    },
+    {
+      token: "⟪AI_EDIT_MATH_2⟫",
+      source: "⟪AI_EDIT_MATH_custom⟫",
+      start: 29,
+      end: 50,
+    },
+  ]);
   assert.equal(restoreMathPreview(result.protectedText, result.entries), input);
   assert.deepEqual(restoreMath(result.protectedText, result.entries), {
     ok: true,
     text: input,
   });
+});
+
+test("copied and serialized collision entries retain everything needed to restore", () => {
+  const input = "prefix ⟪AI_EDIT_MATH_0⟫ and $x$ then ⟪AI_EDIT_MATH_1⟫";
+  const { protectedText, entries } = protectMath(input);
+  const copies = [
+    ["spread", [...entries]],
+    ["slice", entries.slice()],
+    ["JSON", JSON.parse(JSON.stringify(entries))],
+  ];
+  if (typeof structuredClone === "function") {
+    copies.push(["structuredClone", structuredClone(entries)]);
+  }
+
+  for (const [label, copy] of copies) {
+    assert.equal(
+      restoreMathPreview(protectedText, copy),
+      input,
+      `${label} preview`,
+    );
+    assert.deepEqual(
+      restoreMath(protectedText, copy),
+      { ok: true, text: input },
+      `${label} strict restore`,
+    );
+  }
+});
+
+test("entries use only ordinary array elements and documented object fields", () => {
+  const { entries } = protectMath("⟪AI_EDIT_MATH_0⟫ and $x$");
+
+  assert.deepEqual(Object.getOwnPropertySymbols(entries), []);
+  assert.deepEqual(
+    Object.getOwnPropertyNames(entries),
+    [...entries.keys()].map(String).concat("length"),
+  );
+  for (const entry of entries) {
+    assert.deepEqual(Object.keys(entry).sort(), ["end", "source", "start", "token"]);
+  }
 });
 
 test("strict restore still rejects a newly introduced sentinel after escaping originals", () => {
