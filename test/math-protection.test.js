@@ -177,6 +177,74 @@ test("preview replacement does not cascade into token text inside a formula", ()
   );
 });
 
+test("round-trips an original literal that collides with the first math token", () => {
+  const input = "prefix ⟪AI_EDIT_MATH_0⟫ and $x$";
+  const result = protectMath(input);
+  const entriesSnapshot = structuredClone(result.entries);
+  Object.freeze(result.entries);
+  for (const entry of result.entries) Object.freeze(entry);
+
+  assert.equal(
+    result.protectedText.split("⟪AI_EDIT_MATH_0⟫").length - 1,
+    1,
+  );
+  assert.equal(restoreMathPreview(result.protectedText, result.entries), input);
+  assert.deepEqual(restoreMath(result.protectedText, result.entries), {
+    ok: true,
+    text: input,
+  });
+  assert.deepEqual(result.entries, entriesSnapshot);
+});
+
+test("round-trips repeated and differently indexed literal sentinels around formulas", () => {
+  const input =
+    "⟪AI_EDIT_MATH_0⟫ before $a$ ⟪AI_EDIT_MATH_0⟫ between ⟪AI_EDIT_MATH_1⟫ $b$ after ⟪AI_EDIT_MATH_99⟫";
+  const result = protectMath(input);
+
+  assert.deepEqual(
+    result.entries.map(({ token, source }) => ({ token, source })),
+    [
+      { token: "⟪AI_EDIT_MATH_0⟫", source: "$a$" },
+      { token: "⟪AI_EDIT_MATH_1⟫", source: "$b$" },
+    ],
+  );
+  assert.equal(restoreMathPreview(result.protectedText, result.entries), input);
+  assert.deepEqual(restoreMath(result.protectedText, result.entries), {
+    ok: true,
+    text: input,
+  });
+});
+
+test("preview restoration does not cascade into protected literal sentinels", () => {
+  const input = "⟪AI_EDIT_MATH_0⟫ then $x$ then ⟪AI_EDIT_MATH_1⟫";
+  const { protectedText, entries } = protectMath(input);
+
+  assert.equal(restoreMathPreview(protectedText, entries), input);
+});
+
+test("literal-only sentinel text round-trips with no formula entries", () => {
+  const input = "literal ⟪AI_EDIT_MATH_0⟫ and ⟪AI_EDIT_MATH_custom⟫";
+  const result = protectMath(input);
+
+  assert.deepEqual(result.entries, []);
+  assert.equal(restoreMathPreview(result.protectedText, result.entries), input);
+  assert.deepEqual(restoreMath(result.protectedText, result.entries), {
+    ok: true,
+    text: input,
+  });
+});
+
+test("strict restore still rejects a newly introduced sentinel after escaping originals", () => {
+  const input = "literal ⟪AI_EDIT_MATH_0⟫ and $x$";
+  const { protectedText, entries } = protectMath(input);
+  const response = `${protectedText} plus ⟪AI_EDIT_MATH_88⟫`;
+  const restored = restoreMath(response, entries);
+
+  assert.equal(restored.ok, false);
+  assert.equal(restored.text, response);
+  assert.match(restored.error, /⟪AI_EDIT_MATH_88⟫|unexpected|sentinel/i);
+});
+
 test("strict restore rejects a deleted token", () => {
   const { entries } = protectMath("$a$ then $b$");
   const text = "⟪AI_EDIT_MATH_0⟫ then gone";
