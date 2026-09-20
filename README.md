@@ -25,6 +25,7 @@ Included:
 
 - Windows OAuth token auto-detection
 - OpenAI-compatible API mode
+- Incremental response streaming for both ChatGPT OAuth and OpenAI-compatible providers
 - Now the response window can be dragged (Version 1.2.0)
 
 ## Requirements
@@ -119,6 +120,12 @@ You can point it to OpenAI-compatible gateways or self-hosted backends. Version 
 
 The plugin will show a result dialog. You can confirm to replace the selection.
 
+Responses are rendered incrementally as they arrive for both ChatGPT OAuth and
+OpenAI-compatible providers. The result dialog keeps the generated text
+viewable and copyable while it is being completed. If you stop generation, or
+if context-rewrite formula validation fails, the partial/candidate text remains
+available for copying but the `Replace` action is disabled.
+
 ![rightclick.png](https://github.com/KokuYu-sysu/typora-gpt-edit/blob/main/asset/rightclick.png?raw=true)
 
 And it will return the revise suggestion, click `Replace` to do that:
@@ -153,8 +160,26 @@ Output: you can insert the answer to your file or copy it.
 
 - Right-click AI actions only appear when text is selected in the editor.
 - `Ctrl + E` only triggers when no text is selected.
-- Default prompts are optimized for academic writing.
+- The built-in default persona is a senior linguistics expert and professional
+  editor, with attention to grammar, semantics, pragmatics, register,
+  terminology consistency, and cross-language expression.
+- Existing custom prompts remain preserved; changing the built-in defaults does
+  not overwrite prompts that the user has already customized or imported.
 - Chinese and English default prompts are chosen from the browser locale.
+
+### Context-aware rewrite and formulas
+
+`AI Optimize (With Context)` protects formulas outside inline and fenced code
+before sending the request. It recognizes `$...$`, `$$...$$`, `\(...\)`, and
+`\[...\]`, then restores the original formula text after generation. The
+candidate is checked before replacement: every exact formula placeholder must
+appear once and in its original order. Missing, duplicated, mutated, or
+reordered placeholders disable `Replace` while leaving the candidate visible
+and copyable.
+
+When OpenAI-compatible failover is enabled, a failed connection's partial
+stream is cleared before the next provider attempt is displayed, so outputs
+from different attempts are never concatenated.
 
 ## Shortcut Key
 
@@ -213,8 +238,13 @@ In developing and implementing this project, I used another project, https://git
 - Version 1.2.0: Fixed login-related issues and added prompt import/export support for easier migration.
 - Version 1.3.0: Support an OpenAI-compatible method for using typora-ai-edit plugin.
 - Version 1.4.0: Support AI Q&A to image
+- Unreleased Phase 1: Added incremental streaming for both providers, a
+  senior-linguistics-expert/professional-editor default persona while
+  preserving custom prompts, context-aware formula protection and exact
+  placeholder validation, copyable partial results with replacement disabled
+  after stop/validation failure, and clean partial-output reset during provider
+  failover.
 
 ## License
 
 MIT
-
