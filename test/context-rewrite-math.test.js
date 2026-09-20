@@ -13,7 +13,7 @@ globalThis.window = {
 };
 
 const { default: AiEditPlugin, prepareContextRewrite } = await import("../src/plugin.js");
-const { createStreamDialog } = await import("../src/ui.js");
+const { closeAnyDialog, createStreamDialog, promptForText } = await import("../src/ui.js");
 
 class FakeElement {
   constructor(tagName, document) {
@@ -96,14 +96,22 @@ class FakeElement {
 
 function installFakeDom() {
   const keyListeners = new Set();
+  let keydownRemoveCount = 0;
   const document = {
     body: null,
     createElement(tagName) { return new FakeElement(tagName, document); },
     querySelector(selector) { return document.body.querySelector(selector); },
     getElementById(id) { return document.querySelector(`#${id}`); },
     addEventListener(type, listener) { if (type === "keydown") keyListeners.add(listener); },
-    removeEventListener(type, listener) { if (type === "keydown") keyListeners.delete(listener); },
+    removeEventListener(type, listener) {
+      if (type === "keydown") {
+        keydownRemoveCount += 1;
+        keyListeners.delete(listener);
+      }
+    },
     fireKey(event) { for (const listener of keyListeners) listener(event); },
+    getKeydownListenerCount() { return keyListeners.size; },
+    getKeydownRemoveCount() { return keydownRemoveCount; },
   };
   document.body = new FakeElement("body", document);
   globalThis.document = document;
@@ -301,4 +309,72 @@ test("failover clears primary partial output before rendering backup output", as
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("superseding a stream closes it once and removes its keydown listener", () => {
+  closeAnyDialog("test cleanup");
+  const document = installFakeDom();
+  let closeCount = 0;
+  createStreamDialog({
+    title: "First",
+    onClose() { closeCount += 1; },
+  });
+  assert.equal(document.getKeydownListenerCount(), 1);
+
+  createStreamDialog({ title: "Second" });
+  assert.equal(closeCount, 1);
+  assert.equal(document.getKeydownListenerCount(), 1);
+  assert.equal(document.getKeydownRemoveCount(), 1);
+});
+
+test("superseding a prompt resolves its pending result with null", async () => {
+  const document = installFakeDom();
+  const prompt = promptForText({ title: "Prompt", label: "Value" });
+  createStreamDialog({ title: "Replacement" });
+
+  assert.equal(await Promise.race([prompt, Promise.resolve("pending")]), null);
+  assert.ok(document.getElementById("ai-edit-stream-output"));
+});
+
+test("closing an active optimize dialog aborts its request and ignores late output", async () => {
+  const document = installFakeDom();
+  const originalFetch = globalThis.fetch;
+  const plugin = createOptimizePlugin("Selected $A$");
+  let aborted = false;
+  let resolveResponse;
+  globalThis.fetch = (_url, options) => {
+    options.signal.addEventListener("abort", () => { aborted = true; }, { once: true });
+    return new Promise((resolve) => { resolveResponse = resolve; });
+  };
+
+  try {
+    const flow = plugin.openOptimizeFlow(true);
+    completePrompt(document);
+    await Promise.resolve();
+    closeAnyDialog("unload");
+    assert.equal(aborted, true);
+    resolveResponse(sseResponse(`data: ${JSON.stringify({ choices: [{ delta: { content: "late output" } }] })}\n\n`));
+    await flow;
+    assert.deepEqual(plugin.editorSelection.replaced, []);
+    assert.equal(document.getElementById("ai-edit-dialog-overlay"), null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("closing a dialog is idempotent and a stale close cannot clear a newer dialog", () => {
+  const document = installFakeDom();
+  let firstCloseCount = 0;
+  let secondCloseCount = 0;
+  const first = createStreamDialog({ onClose() { firstCloseCount += 1; } });
+  first.close();
+  const second = createStreamDialog({ onClose() { secondCloseCount += 1; } });
+  first.close();
+  first.close();
+
+  assert.equal(firstCloseCount, 1);
+  assert.equal(secondCloseCount, 0);
+  assert.ok(document.getElementById("ai-edit-stream-output"));
+  second.close();
+  assert.equal(secondCloseCount, 1);
 });

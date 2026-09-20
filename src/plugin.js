@@ -395,6 +395,9 @@ export default class AiEditPlugin extends Plugin {
         messages: [{ role: "user", content: userPrompt }],
         settings,
         onChunk: (chunk) => {
+          if (closed) {
+            return;
+          }
           rawOutput += chunk;
           stream.setValue(
             withContext
@@ -403,7 +406,7 @@ export default class AiEditPlugin extends Plugin {
           );
         },
         onAttemptStart: ({ resetOutput }) => {
-          if (resetOutput) {
+          if (!closed && resetOutput) {
             rawOutput = "";
             stream.setValue("");
           }

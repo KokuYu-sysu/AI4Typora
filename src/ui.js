@@ -125,6 +125,14 @@ function closeOverlay(overlay) {
   }
 }
 
+let activeDialog = null;
+
+function clearActiveDialog(dialog) {
+  if (activeDialog === dialog) {
+    activeDialog = null;
+  }
+}
+
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
@@ -194,7 +202,11 @@ function makeDialogDraggable(overlay) {
   });
 }
 
-export function closeAnyDialog() {
+export function closeAnyDialog(reason = "superseded") {
+  if (activeDialog) {
+    activeDialog.close(reason);
+    return;
+  }
   removeElement("#ai-edit-dialog-overlay");
 }
 
@@ -227,8 +239,19 @@ export function promptForText(options) {
     input.value = options.initialValue || "";
     window.setTimeout(() => input.focus(), 50);
 
+    let finished = false;
+    const dialog = {
+      close: () => finish(null),
+    };
+    activeDialog = dialog;
+
     function finish(value) {
+      if (finished) {
+        return;
+      }
+      finished = true;
       closeOverlay(overlay);
+      clearActiveDialog(dialog);
       resolve(value);
     }
 
@@ -279,6 +302,7 @@ export function createStreamDialog(options) {
   output.value = options.waitingText || "Waiting for response...";
   const waitingText = options.waitingText || "Waiting for response...";
   let completedActions = null;
+  let closed = false;
 
   function emitClose(reason) {
     if (typeof options.onClose === "function") {
@@ -341,8 +365,27 @@ export function createStreamDialog(options) {
 
   document.addEventListener("keydown", onDialogKeyDown, true);
 
+  const dialog = {
+    close: closeDialog,
+  };
+  activeDialog = dialog;
+
+  function closeDialog(reason = "close") {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    document.removeEventListener("keydown", onDialogKeyDown, true);
+    closeOverlay(overlay);
+    clearActiveDialog(dialog);
+    emitClose(reason);
+  }
+
   const api = {
     append(delta) {
+      if (closed) {
+        return;
+      }
       if (output.value === waitingText) {
         output.value = "";
       }
@@ -350,6 +393,9 @@ export function createStreamDialog(options) {
       output.scrollTop = output.scrollHeight;
     },
     setValue(value) {
+      if (closed) {
+        return;
+      }
       output.value = String(value ?? "");
       output.scrollTop = output.scrollHeight;
     },
@@ -357,11 +403,17 @@ export function createStreamDialog(options) {
       return output.value;
     },
     showError(message) {
+      if (closed) {
+        return;
+      }
       completedActions = null;
       output.value = `${output.value}\n\n${message}`.trim();
       footer.innerHTML = '<div class="ai-edit-spacer"></div><button class="ai-edit-btn primary" data-action="close">Close</button>';
     },
     showCompleted(completedOptions) {
+      if (closed) {
+        return;
+      }
       completedActions = completedOptions;
       footer.innerHTML = "";
       const copyButton = document.createElement("button");
@@ -409,9 +461,7 @@ export function createStreamDialog(options) {
       };
     },
     close(reason = "close") {
-      document.removeEventListener("keydown", onDialogKeyDown, true);
-      closeOverlay(overlay);
-      emitClose(reason);
+      closeDialog(reason);
     },
   };
 
