@@ -163,6 +163,75 @@ test("simultaneous request handles abort independently", async () => {
   }
 });
 
+test("invalid normalized messages reject before fetch or failover", async (t) => {
+  const cases = [
+    { name: "null item", message: null, field: /messages\[0\]/ },
+    { name: "system role", message: { role: "system", content: "text" }, field: /messages\[0\]\.role/ },
+    { name: "unknown role", message: { role: "tool", content: "text" }, field: /messages\[0\]\.role/ },
+    { name: "missing content", message: { role: "user" }, field: /messages\[0\]\.content/ },
+    { name: "non-string content", message: { role: "user", content: 42 }, field: /messages\[0\]\.content/ },
+    {
+      name: "non-string imageInput",
+      message: { role: "user", content: "text", imageInput: 42 },
+      field: /messages\[0\]\.imageInput/,
+    },
+    {
+      name: "empty imageInput",
+      message: { role: "user", content: "text", imageInput: "" },
+      field: /messages\[0\]\.imageInput/,
+    },
+    {
+      name: "assistant imageInput",
+      message: { role: "assistant", content: "text", imageInput: "https://example.com/image.png" },
+      field: /messages\[0\]\.imageInput/,
+    },
+  ];
+
+  for (const invalidCase of cases) {
+    await t.test(invalidCase.name, async () => {
+      const originalFetch = globalThis.fetch;
+      let fetchCount = 0;
+      const attempts = [];
+      globalThis.fetch = async () => {
+        fetchCount += 1;
+        const payload = `data: ${JSON.stringify({ choices: [{ delta: { content: "unexpected" } }] })}\n\n`;
+        return createChunkedSseResponse([new TextEncoder().encode(payload)]);
+      };
+
+      try {
+        const handle = api.createAiRequest({
+          systemPrompt: "sys",
+          messages: [invalidCase.message],
+          settings: {
+            provider: "openai_compat",
+            openaiCompat: {
+              baseUrl: "https://primary.example.com",
+              apiKey: "primary-key",
+              model: "model",
+            },
+            openaiCompatBackups: [{
+              baseUrl: "https://backup.example.com",
+              apiKey: "backup-key",
+              model: "model",
+            }],
+          },
+          onAttemptStart: (attempt) => attempts.push(attempt),
+        });
+
+        await assert.rejects(handle.promise, (error) => {
+          assert.ok(error instanceof TypeError);
+          assert.match(error.message, invalidCase.field);
+          return true;
+        });
+        assert.equal(fetchCount, 0);
+        assert.deepEqual(attempts, []);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+  }
+});
+
 function createChunkedSseResponse(chunks) {
   return {
     ok: true,

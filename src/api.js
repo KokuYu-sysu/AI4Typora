@@ -277,6 +277,38 @@ function toOpenAiMessages(systemPrompt, messages) {
   ];
 }
 
+function validateMessages(messages) {
+  if (!Array.isArray(messages)) {
+    throw new TypeError("messages must be an array.");
+  }
+
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    const fieldPrefix = `messages[${index}]`;
+    if (!message || typeof message !== "object" || Array.isArray(message)) {
+      throw new TypeError(`${fieldPrefix} must be a non-null object.`);
+    }
+    if (message.role !== "user" && message.role !== "assistant") {
+      throw new TypeError(`${fieldPrefix}.role must be exactly "user" or "assistant".`);
+    }
+    if (typeof message.content !== "string") {
+      throw new TypeError(`${fieldPrefix}.content must be a string.`);
+    }
+
+    const hasImageInput = Object.prototype.hasOwnProperty.call(message, "imageInput");
+    if (hasImageInput) {
+      if (typeof message.imageInput !== "string" || !message.imageInput.trim()) {
+        throw new TypeError(`${fieldPrefix}.imageInput must be a non-empty string when present.`);
+      }
+      if (message.role !== "user") {
+        throw new TypeError(`${fieldPrefix}.imageInput is permitted only on user messages.`);
+      }
+    }
+  }
+
+  return messages;
+}
+
 function throwIfAborted(signal) {
   if (!signal?.aborted) {
     return;
@@ -428,23 +460,28 @@ export function createAiRequest({
   onAttemptStart,
 }) {
   const controller = new AbortController();
-  const normalizedMessages = Array.isArray(messages) ? messages : [];
-  const promise = settings?.provider === "openai_compat"
-    ? callOpenAiCompatApiWithFailover(
-      systemPrompt,
-      normalizedMessages,
-      settings,
-      onChunk,
-      onAttemptStart,
-      controller.signal,
-    )
-    : callChatGptOauthApi(
-      systemPrompt,
-      normalizedMessages,
-      settings,
-      onChunk,
-      controller.signal,
-    );
+  let promise;
+  try {
+    const normalizedMessages = validateMessages(messages);
+    promise = settings?.provider === "openai_compat"
+      ? callOpenAiCompatApiWithFailover(
+        systemPrompt,
+        normalizedMessages,
+        settings,
+        onChunk,
+        onAttemptStart,
+        controller.signal,
+      )
+      : callChatGptOauthApi(
+        systemPrompt,
+        normalizedMessages,
+        settings,
+        onChunk,
+        controller.signal,
+      );
+  } catch (error) {
+    promise = Promise.reject(error);
+  }
 
   return {
     promise,

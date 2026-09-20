@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { callAi, callAiWithImage } from "../src/api.js";
+import { abortCurrentRequest, callAi, callAiWithImage } from "../src/api.js";
 
 function createSseResponse(text) {
   const encoder = new TextEncoder();
@@ -96,6 +96,48 @@ test("callAiWithImage normalizes one multimodal user message", async () => {
       },
     ]);
   } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("an older legacy wrapper cannot clear the newer active request", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = (_url, options) => new Promise((resolve, reject) => {
+    const request = { signal: options.signal, resolve, reject };
+    requests.push(request);
+    options.signal.addEventListener("abort", () => {
+      const error = new Error("aborted");
+      error.name = "AbortError";
+      reject(error);
+    }, { once: true });
+  });
+  let olderPromise;
+  let newerPromise;
+
+  try {
+    olderPromise = callAi("sys", "older", createSettings(), {});
+    newerPromise = callAiWithImage(
+      "sys",
+      "newer",
+      "data:image/png;base64,AAA=",
+      createSettings(),
+      {},
+    );
+    assert.equal(requests.length, 2);
+
+    requests[0].resolve(createSseResponse("older-ok"));
+    assert.equal(await olderPromise, "older-ok");
+
+    const newerRejected = assert.rejects(newerPromise, { name: "AbortError" });
+    abortCurrentRequest();
+    await newerRejected;
+
+    assert.equal(requests[0].signal.aborted, false);
+    assert.equal(requests[1].signal.aborted, true);
+  } finally {
+    abortCurrentRequest();
+    await Promise.allSettled([olderPromise, newerPromise].filter(Boolean));
     globalThis.fetch = originalFetch;
   }
 });
