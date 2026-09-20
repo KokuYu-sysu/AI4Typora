@@ -121,6 +121,63 @@ test("ChatGPT OAuth requests preserve normalized multi-turn input", async () => 
   }
 });
 
+test("ChatGPT OAuth snapshots messages before awaiting token resolution", async () => {
+  const originalFetch = globalThis.fetch;
+  const tokenPath = path.resolve("test", `.tmp-api-snapshot-token-${process.pid}.json`);
+  fs.writeFileSync(tokenPath, JSON.stringify({
+    access: "access-token",
+    refresh: "refresh-token",
+    expires: Date.now() + 3_600_000,
+    account_id: "account-id",
+  }));
+  let requestOptions;
+  globalThis.fetch = async (_url, options) => {
+    requestOptions = options;
+    const payload = `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "snapshot-ok" })}\n\n`;
+    return createChunkedSseResponse([new TextEncoder().encode(payload)]);
+  };
+  const firstMessage = {
+    role: "user",
+    content: "original question",
+    imageInput: "https://example.com/original.png",
+  };
+  const secondMessage = { role: "assistant", content: "original answer" };
+  const messages = [firstMessage, secondMessage];
+
+  try {
+    const handle = api.createAiRequest({
+      systemPrompt: "system rules",
+      messages,
+      settings: {
+        provider: "chatgpt_oauth",
+        model: "gpt-5.4",
+        oauthTokenPath: tokenPath,
+      },
+    });
+
+    firstMessage.role = "assistant";
+    firstMessage.content = "mutated question";
+    firstMessage.imageInput = "https://example.com/mutated.png";
+    messages[1] = { role: "user", content: "replacement" };
+    messages.push({ role: "user", content: "late addition" });
+
+    assert.equal(await handle.promise, "snapshot-ok");
+    assert.deepEqual(JSON.parse(requestOptions.body).input, [
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: "original question" },
+          { type: "input_image", image_url: "https://example.com/original.png" },
+        ],
+      },
+      { role: "assistant", content: [{ type: "input_text", text: "original answer" }] },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(tokenPath, { force: true });
+  }
+});
+
 test("simultaneous request handles abort independently", async () => {
   const originalFetch = globalThis.fetch;
   const pending = [];

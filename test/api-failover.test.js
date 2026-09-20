@@ -162,3 +162,57 @@ test("aborting a non-2xx error-body read does not start failover", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("failover retries use the request-owned message snapshot", async () => {
+  const originalFetch = globalThis.fetch;
+  const bodies = [];
+  let rejectPrimary;
+  globalThis.fetch = async (_url, options) => {
+    bodies.push(JSON.parse(options.body));
+    if (bodies.length === 1) {
+      return new Promise((_resolve, reject) => {
+        rejectPrimary = reject;
+      });
+    }
+    return createSseResponse("backup-ok");
+  };
+  const firstMessage = {
+    role: "user",
+    content: "original question",
+    imageInput: "https://example.com/original.png",
+  };
+  const secondMessage = { role: "assistant", content: "original answer" };
+  const messages = [firstMessage, secondMessage];
+
+  try {
+    const handle = createAiRequest({
+      systemPrompt: "sys",
+      messages,
+      settings: createSettings(),
+    });
+
+    firstMessage.role = "assistant";
+    firstMessage.content = "mutated question";
+    firstMessage.imageInput = "https://example.com/mutated.png";
+    messages[1] = { role: "user", content: "replacement" };
+    messages.push({ role: "user", content: "late addition" });
+    rejectPrimary(new Error("primary failed"));
+
+    assert.equal(await handle.promise, "backup-ok");
+    assert.equal(bodies.length, 2);
+    assert.deepEqual(bodies[1].messages, bodies[0].messages);
+    assert.deepEqual(bodies[1].messages, [
+      { role: "system", content: "sys" },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "original question" },
+          { type: "image_url", image_url: { url: "https://example.com/original.png" } },
+        ],
+      },
+      { role: "assistant", content: "original answer" },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

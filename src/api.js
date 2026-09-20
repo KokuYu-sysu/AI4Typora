@@ -282,31 +282,43 @@ function validateMessages(messages) {
     throw new TypeError("messages must be an array.");
   }
 
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
+  const inputMessages = messages.slice();
+  const normalizedMessages = [];
+  for (let index = 0; index < inputMessages.length; index += 1) {
+    const message = inputMessages[index];
     const fieldPrefix = `messages[${index}]`;
     if (!message || typeof message !== "object" || Array.isArray(message)) {
       throw new TypeError(`${fieldPrefix} must be a non-null object.`);
     }
-    if (message.role !== "user" && message.role !== "assistant") {
+
+    const role = message.role;
+    const content = message.content;
+    const hasImageInput = Object.prototype.hasOwnProperty.call(message, "imageInput");
+    const imageInput = hasImageInput ? message.imageInput : undefined;
+    if (role !== "user" && role !== "assistant") {
       throw new TypeError(`${fieldPrefix}.role must be exactly "user" or "assistant".`);
     }
-    if (typeof message.content !== "string") {
+    if (typeof content !== "string") {
       throw new TypeError(`${fieldPrefix}.content must be a string.`);
     }
 
-    const hasImageInput = Object.prototype.hasOwnProperty.call(message, "imageInput");
     if (hasImageInput) {
-      if (typeof message.imageInput !== "string" || !message.imageInput.trim()) {
+      if (typeof imageInput !== "string" || !imageInput.trim()) {
         throw new TypeError(`${fieldPrefix}.imageInput must be a non-empty string when present.`);
       }
-      if (message.role !== "user") {
+      if (role !== "user") {
         throw new TypeError(`${fieldPrefix}.imageInput is permitted only on user messages.`);
       }
     }
+
+    const normalizedMessage = { role, content };
+    if (hasImageInput) {
+      normalizedMessage.imageInput = imageInput;
+    }
+    normalizedMessages.push(normalizedMessage);
   }
 
-  return messages;
+  return normalizedMessages;
 }
 
 function throwIfAborted(signal) {
