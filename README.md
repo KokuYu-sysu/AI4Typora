@@ -138,8 +138,8 @@ And it will return the revise suggestion, click `Replace` to do that:
 
 ### Ask writing questions
 
-1. Place the cursor in the editor without selecting text
-2. Press `Ctrl + E` or right-click in the menu to find `AI Q&A`.
+1. Focus the editor, with or without a text selection.
+2. Press `Ctrl + E`, or select text and choose `AI Q&A` from the right-click menu.
 3. Enter your question
 4. Optionally type `YES` to include the full document as context
 
@@ -149,7 +149,7 @@ The answer can then be inserted into the document.
 
 ### Ask Image
 
-Right click to the Image to show:
+Right-click an image to use the separate image Q&A action:
 
 ![](https://github.com/KokuYu-sysu/typora-gpt-edit/blob/main/asset/Image.png?raw=true)
 
@@ -164,19 +164,23 @@ Output: you can insert the answer to your file or copy it.
 ## Default behavior
 
 - Right-click AI actions only appear when text is selected in the editor.
-- `Ctrl + E` only triggers when no text is selected.
+- Right-click actions on an image are available when the target is an image.
+- `Ctrl + E` triggers Q&A whenever the editor target is focused, regardless of
+  whether text is selected.
 - The built-in default persona is a senior linguistics expert and professional
   editor, with attention to grammar, semantics, pragmatics, register,
   terminology consistency, and cross-language expression.
 - Existing custom prompts remain preserved; changing the built-in defaults does
   not overwrite prompts that the user has already customized or imported.
-- Chinese and English default prompts are chosen from the browser locale.
+- Chinese and English default prompts are chosen from the browser locale, and
+  all prompts can be edited to suit your document and workflow.
 
 ### Context-aware rewrite and formulas
 
 `AI Optimize (Use Full Document Context)` protects formulas in the selected
-passage being rewritten, except formulas inside inline and fenced code, before
-sending the request. It recognizes `$...$`, `$$...$$`, `\(...\)`, and `\[...\]`,
+passage being rewritten, except formulas inside inline-code spans and fenced
+code blocks, before sending the request. It recognizes `$...$`, `$$...$$`,
+`\(...\)`, and `\[...\]`,
 then restores the original formula text after generation. The full document is
 provided as unchanged context; it is not itself transformed or protected for
 replacement. The candidate is checked before replacement: every exact formula
@@ -192,7 +196,7 @@ from different attempts are never concatenated.
 
 | Shortcut Key       | Function                                     |
 | ------------------ | -------------------------------------------- |
-| `Ctrl + E`         | `AI Q&A` when no text is selected            |
+| `Ctrl + E`         | `AI Q&A` when the editor is focused         |
 | `Ctrl + R`         | `AI Optimize (Selection Only)`               |
 | `Ctrl + Shift + R` | `AI Optimize (Use Full Document Context)`    |
 | `Ctrl + C`         | `Copy` content in the output window and close |
@@ -222,7 +226,6 @@ Main files:
 
 - This project is currently tested for Windows-oriented community-plugin usage. For macOS, see [Aurisper/typora-ai-edit](https://github.com/Aurisper/typora-ai-edit).
 - The plugin depends on Typora Community Plugin Framework internals.
-- Browser locale selects the Chinese or English defaults, and all prompts can be edited to suit your document and workflow.
 
 ## Publish package
 
@@ -246,7 +249,7 @@ In developing and implementing this project, I used [Aurisper/typora-ai-edit](ht
 - Version 1.3.0: Support an OpenAI-compatible method for using typora-ai-edit plugin.
 - Version 1.4.0: Support AI Q&A to image
 - Unreleased (Phase 1): Added incremental streaming for both providers, a
-  senior-linguistics-expert/professional-editor default persona while
+  senior linguistics expert and professional editor default persona while
   preserving custom prompts, context-aware formula protection and exact
   placeholder validation, copyable partial results with replacement disabled
   after stop/validation failure, and clears partial output during provider
