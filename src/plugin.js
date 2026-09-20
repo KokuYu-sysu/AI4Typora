@@ -1,11 +1,22 @@
 ﻿const { Plugin, PluginSettings, Notice } = window[Symbol.for("typora-plugin-core@v2")];
 
-import { callAi, callAiWithImage, abortCurrentRequest } from "./api.js";
+import { callAi, callAiWithImage, abortCurrentRequest, createAiRequest } from "./api.js";
 import { DEFAULT_SETTINGS, mergeSettings, shortcutMatches } from "./config.js";
 import { EditorSelectionController } from "./editor.js";
 import { prepareImageInputForModel } from "./platform.js";
 import { AiEditSettingTab } from "./settings-tab.js";
 import { ensureStyles, removeStyles, showToast, openContextMenu, closeContextMenu, promptForText, createStreamDialog, closeAnyDialog } from "./ui.js";
+import { protectMath, restoreMathPreview, restoreMath } from "./math-protection.js";
+
+export function prepareContextRewrite(selectedText, promptTemplate, documentText) {
+  const protectedSelection = protectMath(selectedText);
+  return {
+    userPrompt: String(promptTemplate)
+      .replace(/\{selection\}/g, protectedSelection.protectedText)
+      .replace(/\{document\}/g, String(documentText)),
+    mathEntries: protectedSelection.entries,
+  };
+}
 
 function matchesFixedShortcut(event, shortcut) {
   if (!event || !event.key) {
@@ -330,6 +341,11 @@ export default class AiEditPlugin extends Plugin {
       return;
     }
 
+    const settings = this.getSettings();
+    const promptKey = withContext ? "optimize_with_context" : "optimize";
+    const promptConfig = settings.prompts[promptKey];
+    const documentText = withContext ? this.editorSelection.getDocumentText() : "";
+
     const extraPrompt = await promptForText({
       title: withContext ? "AI Optimize With Context" : "AI Optimize Selection",
       label: "Additional instructions (optional)",
@@ -340,49 +356,109 @@ export default class AiEditPlugin extends Plugin {
       return;
     }
 
-    const settings = this.getSettings();
-    const promptKey = withContext ? "optimize_with_context" : "optimize";
-    const promptConfig = settings.prompts[promptKey];
-    const documentText = withContext ? this.editorSelection.getDocumentText() : "";
-    let userPrompt = promptConfig.user
-      .replace(/\{selection\}/g, selectedText)
-      .replace(/\{document\}/g, documentText);
+    const contextRewrite = withContext
+      ? prepareContextRewrite(selectedText, promptConfig.user, documentText)
+      : { userPrompt: promptConfig.user.replace(/\{selection\}/g, selectedText), mathEntries: [] };
+    let userPrompt = contextRewrite.userPrompt;
 
     if (extraPrompt) {
       userPrompt = `${extraPrompt}\n\n${userPrompt}`;
     }
 
+    let activeRequest = null;
+    let rawOutput = "";
+    let generating = true;
+    let stopped = false;
+    let closed = false;
+
     const stream = createStreamDialog({
       title: withContext ? "AI Optimize With Context" : "AI Optimize Selection",
       waitingText: "Waiting for AI response...",
-      onStop: () => abortCurrentRequest(),
+      onStop: () => {
+        if (!generating || stopped) {
+          return;
+        }
+        stopped = true;
+        activeRequest?.abort();
+      },
+      onClose: () => {
+        closed = true;
+        if (generating) {
+          activeRequest?.abort();
+        }
+      },
     });
 
     try {
-      const result = await callAi(promptConfig.system, userPrompt, settings, {
-        onChunk: (chunk) => stream.append(chunk),
+      const request = createAiRequest({
+        systemPrompt: promptConfig.system,
+        messages: [{ role: "user", content: userPrompt }],
+        settings,
+        onChunk: (chunk) => {
+          rawOutput += chunk;
+          stream.setValue(
+            withContext
+              ? restoreMathPreview(rawOutput, contextRewrite.mathEntries)
+              : rawOutput,
+          );
+        },
+        onAttemptStart: ({ resetOutput }) => {
+          if (resetOutput) {
+            rawOutput = "";
+            stream.setValue("");
+          }
+        },
       });
+      activeRequest = request;
+      const result = await request.promise;
+      if (activeRequest === request) {
+        activeRequest = null;
+      }
+      generating = false;
+      if (closed) {
+        return;
+      }
       if (!result.trim()) {
         stream.showError("The model returned an empty response.");
         return;
       }
+
+      let replacement = result;
+      if (withContext) {
+        const restored = restoreMath(result, contextRewrite.mathEntries);
+        stream.setValue(restoreMathPreview(result, contextRewrite.mathEntries));
+        if (!restored.ok) {
+          stream.showCompleted({
+            confirmText: "Replace",
+            replaceAllowed: false,
+            validationMessage: restored.error,
+          });
+          return;
+        }
+        replacement = restored.text;
+      }
+
       stream.showCompleted({
         confirmText: "Replace",
-        onConfirm: (value) => {
-          const ok = this.editorSelection.restoreAndReplace(value);
+        onConfirm: () => {
+          const ok = this.editorSelection.restoreAndReplace(replacement);
           stream.close();
           showToast(ok ? "Selection replaced." : "Replace failed.", ok ? "success" : "error");
         },
       });
     } catch (error) {
+      generating = false;
+      activeRequest = null;
+      if (closed) {
+        return;
+      }
       if (error && error.name === "AbortError") {
         stream.showCompleted({
           confirmText: "Replace",
-          onConfirm: (value) => {
-            const ok = this.editorSelection.restoreAndReplace(value);
-            stream.close();
-            showToast(ok ? "Selection replaced." : "Replace failed.", ok ? "success" : "error");
-          },
+          replaceAllowed: false,
+          validationMessage: stopped
+            ? "Request stopped. Partial response was not applied."
+            : "Request cancelled. Partial response was not applied.",
         });
       } else {
         stream.showError(error?.message || "The request failed.");

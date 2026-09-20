@@ -307,7 +307,11 @@ export function createStreamDialog(options) {
   }
 
   function runConfirm() {
-    if (!completedActions || typeof completedActions.onConfirm !== "function") {
+    if (
+      !completedActions ||
+      completedActions.replaceAllowed === false ||
+      typeof completedActions.onConfirm !== "function"
+    ) {
       return;
     }
     completedActions.onConfirm(getOutputText());
@@ -345,6 +349,10 @@ export function createStreamDialog(options) {
       output.value += delta;
       output.scrollTop = output.scrollHeight;
     },
+    setValue(value) {
+      output.value = String(value ?? "");
+      output.scrollTop = output.scrollHeight;
+    },
     getValue() {
       return output.value;
     },
@@ -355,12 +363,38 @@ export function createStreamDialog(options) {
     },
     showCompleted(completedOptions) {
       completedActions = completedOptions;
-      footer.innerHTML = `
-        <button class="ai-edit-btn secondary" data-action="copy">Copy</button>
-        <div class="ai-edit-spacer"></div>
-        <button class="ai-edit-btn secondary" data-action="close">Close</button>
-        <button class="ai-edit-btn primary" data-action="confirm">${completedOptions.confirmText || "Insert"}</button>
-      `;
+      footer.innerHTML = "";
+      const copyButton = document.createElement("button");
+      copyButton.className = "ai-edit-btn secondary";
+      copyButton.dataset.action = "copy";
+      copyButton.textContent = "Copy";
+      footer.appendChild(copyButton);
+
+      if (completedOptions.validationMessage) {
+        const validation = document.createElement("div");
+        validation.className = "ai-edit-validation-message";
+        validation.dataset.action = "validation";
+        validation.textContent = String(completedOptions.validationMessage);
+        footer.appendChild(validation);
+      }
+
+      const spacer = document.createElement("div");
+      spacer.className = "ai-edit-spacer";
+      footer.appendChild(spacer);
+
+      const closeButton = document.createElement("button");
+      closeButton.className = "ai-edit-btn secondary";
+      closeButton.dataset.action = "close";
+      closeButton.textContent = "Close";
+      footer.appendChild(closeButton);
+
+      if (completedOptions.replaceAllowed !== false) {
+        const confirmButton = document.createElement("button");
+        confirmButton.className = "ai-edit-btn primary";
+        confirmButton.dataset.action = "confirm";
+        confirmButton.textContent = completedOptions.confirmText || "Insert";
+        footer.appendChild(confirmButton);
+      }
       footer.onclick = (event) => {
         const action = event.target?.dataset?.action;
         if (action === "copy") {
