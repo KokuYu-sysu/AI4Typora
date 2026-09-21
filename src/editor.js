@@ -6,6 +6,10 @@
     this.insertCid = "";
     this.insertionRange = null;
     this.selectionSnapshot = null;
+    this.lastCaretRange = null;
+    this.lastCaretDocumentKey = "";
+    this.caretTrackingHandler = null;
+    this.getCaretDocumentIdentity = null;
   }
 
   isEditorTarget(node) {
@@ -118,6 +122,69 @@
       event.initEvent("input", true, false);
       writeEl.dispatchEvent(event);
     } catch (_) {}
+  }
+
+  startCaretTracking(getDocumentIdentity) {
+    this.stopCaretTracking();
+    if (typeof document === "undefined" || typeof document.addEventListener !== "function") return;
+    this.getCaretDocumentIdentity = typeof getDocumentIdentity === "function" ? getDocumentIdentity : null;
+    this.caretTrackingHandler = () => {
+      try {
+        const selection = window.getSelection();
+        const writeEl = document.getElementById("write");
+        if (!selection || !writeEl || selection.rangeCount === 0) return;
+        const range = selection.getRangeAt(0).cloneRange();
+        if (!this.isRangeUsable(range, writeEl)
+          || !this.isRangeUsable({ startContainer: range.endContainer }, writeEl)) return;
+        const identity = this.getCaretDocumentIdentity && this.getCaretDocumentIdentity();
+        const key = String(identity?.key || "");
+        if (!key) return;
+        this.lastCaretRange = range;
+        this.lastCaretDocumentKey = key;
+      } catch (_) {}
+    };
+    document.addEventListener("selectionchange", this.caretTrackingHandler);
+  }
+
+  stopCaretTracking() {
+    if (this.caretTrackingHandler && typeof document !== "undefined" && typeof document.removeEventListener === "function") {
+      document.removeEventListener("selectionchange", this.caretTrackingHandler);
+    }
+    this.caretTrackingHandler = null;
+    this.getCaretDocumentIdentity = null;
+  }
+
+  insertMarkdownAtLastCaret(text) {
+    const payload = `\n\n${String(text || "")}\n\n`;
+    try {
+      const selection = window.getSelection();
+      const writeEl = document.getElementById("write");
+      const currentKey = String(this.getCaretDocumentIdentity?.()?.key || "");
+      if (!selection || !writeEl || !this.lastCaretRange || !this.lastCaretDocumentKey) {
+        return { ok: false, reason: "no-caret" };
+      }
+      if (currentKey !== this.lastCaretDocumentKey) return { ok: false, reason: "document-changed" };
+
+      let range;
+      try {
+        range = this.lastCaretRange.cloneRange();
+      } catch (_) {}
+      if (!this.isRangeUsable(range, writeEl)) {
+        const target = writeEl.lastElementChild;
+        if (!target) return { ok: false, reason: "range-detached" };
+        range = document.createRange();
+        range.selectNodeContents(target);
+        range.collapse(false);
+      }
+      if (typeof writeEl.focus === "function") writeEl.focus();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      if (!document.execCommand("insertText", false, payload)) return { ok: false, reason: "insert-failed" };
+      this.notifyEditorInput(writeEl);
+      return { ok: true };
+    } catch (_) {
+      return { ok: false, reason: "insert-failed" };
+    }
   }
 
   getElectronClipboard() {
