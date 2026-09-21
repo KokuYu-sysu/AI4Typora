@@ -487,11 +487,27 @@ export function createChatStore(options = {}) {
     }));
   }
 
+  async function enforceInitialRetention() {
+    const nextDatabase = copy(database);
+    const beforeAssets = referencedAssets(database);
+    retain(nextDatabase);
+    if (serialized(nextDatabase) === serialized(database)) return;
+    await writeJsonAtomically(nextDatabase);
+    database = nextDatabase;
+    try {
+      await removeLostAssets(beforeAssets, referencedAssets(nextDatabase));
+    } catch (error) {
+      error.historyPersisted = true;
+      throw error;
+    }
+  }
+
   async function initialize() {
     if (!initializePromise) {
       initializePromise = readDatabase().then(async () => {
         await loadLiveAssetSizes();
         await removeStartupOrphans();
+        await enforceInitialRetention();
         initialized = true;
       });
     }
@@ -553,35 +569,76 @@ export function createChatStore(options = {}) {
     return operation;
   }
 
-  function reserveAssetLease(image) {
+  async function reserveAssetLeaseInQueue(image) {
+    const nextDatabase = copy(database);
+    const beforeAssets = referencedAssets(database);
+    const priorSize = assetSizes.get(image.assetId);
+    const priorMetadata = assetMetadataById.get(image.assetId);
+    const priorLease = pendingAssetLeases.get(image.assetId) || 0;
+    let persisted = false;
+    cacheAsset(image);
+    retainAssetLease(image);
+    try {
+      retain(nextDatabase);
+      if (serialized(nextDatabase) !== serialized(database)) {
+        await writeJsonAtomically(nextDatabase);
+        database = nextDatabase;
+        persisted = true;
+        await removeLostAssets(beforeAssets, referencedAssets(nextDatabase));
+      }
+    } catch (error) {
+      if (!persisted) {
+        if (priorSize === undefined) assetSizes.delete(image.assetId);
+        else assetSizes.set(image.assetId, priorSize);
+        if (priorMetadata === undefined) assetMetadataById.delete(image.assetId);
+        else assetMetadataById.set(image.assetId, priorMetadata);
+        if (priorLease) pendingAssetLeases.set(image.assetId, priorLease);
+        else pendingAssetLeases.delete(image.assetId);
+      } else {
+        error.historyPersisted = true;
+      }
+      throw error;
+    }
+  }
+
+  async function writeAssetAtomicallyIfMissing(target, bytes) {
+    try {
+      await fs.stat(target);
+      return false;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    const suffix = crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const temp = `${target}.${suffix}.tmp`;
+    try {
+      await fs.writeFile(temp, bytes, { flag: "wx" });
+      await fs.rename(temp, target);
+      return true;
+    } catch (error) {
+      try {
+        await fs.unlink(temp);
+      } catch (_) {}
+      throw error;
+    }
+  }
+
+  function writeAndReserveAsset(image, bytes, target) {
     const operation = writeQueue.then(async () => {
       if (!initialized) await initialize();
-      const nextDatabase = copy(database);
-      const beforeAssets = referencedAssets(database);
-      const priorSize = assetSizes.get(image.assetId);
-      const priorMetadata = assetMetadataById.get(image.assetId);
-      const priorLease = pendingAssetLeases.get(image.assetId) || 0;
-      let persisted = false;
-      cacheAsset(image);
-      retainAssetLease(image);
+      let created = false;
       try {
-        retain(nextDatabase);
-        if (serialized(nextDatabase) !== serialized(database)) {
-          await writeJsonAtomically(nextDatabase);
-          database = nextDatabase;
-          persisted = true;
-          await removeLostAssets(beforeAssets, referencedAssets(nextDatabase));
-        }
+        created = await writeAssetAtomicallyIfMissing(target, bytes);
+        await reserveAssetLeaseInQueue(image);
       } catch (error) {
-        if (!persisted) {
-          if (priorSize === undefined) assetSizes.delete(image.assetId);
-          else assetSizes.set(image.assetId, priorSize);
-          if (priorMetadata === undefined) assetMetadataById.delete(image.assetId);
-          else assetMetadataById.set(image.assetId, priorMetadata);
-          if (priorLease) pendingAssetLeases.set(image.assetId, priorLease);
-          else pendingAssetLeases.delete(image.assetId);
-        } else {
-          error.historyPersisted = true;
+        if (created && !error.historyPersisted
+          && !pendingAssetLeases.get(image.assetId) && !referencedAssets(database).has(image.assetId)) {
+          try {
+            await fs.unlink(target);
+          } catch (cleanupError) {
+            if (cleanupError?.code !== "ENOENT") {
+              throw new Error(`Image storage failed and rollback cleanup failed: ${cleanupError?.message || cleanupError}`);
+            }
+          }
         }
         throw error;
       }
@@ -824,15 +881,7 @@ export function createChatStore(options = {}) {
       });
       const target = assetPathFor(metadata);
       if (!target) throw new Error("Image asset path is invalid.");
-      await reserveAssetLease(metadata);
-      try {
-        await fs.writeFile(target, image.bytes, { flag: "wx" });
-      } catch (error) {
-        if (error?.code !== "EEXIST") {
-          await releaseAssetLease(metadata);
-          throw error;
-        }
-      }
+      await writeAndReserveAsset(metadata, image.bytes, target);
       return metadata;
     },
 

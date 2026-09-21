@@ -599,6 +599,53 @@ test("storage capacity counts unique assets and prunes inactive sessions before 
   });
 });
 
+test("asset write and reserve failures leave existing history and assets unchanged", async () => {
+  await withTempDir(async (baseDir) => {
+    const bytes = Buffer.alloc(800, 24);
+    const failingFs = {
+      ...fsPromises,
+      async writeFile(filePath, ...args) {
+        if (String(filePath).includes("chat-assets")) throw new Error("disk full");
+        return fsPromises.writeFile(filePath, ...args);
+      },
+    };
+    const writeFailStore = createChatStore({ baseDir, fs: failingFs, now: clock(), fetch: imageFetch(bytes) });
+    await writeFailStore.initialize();
+    await writeFailStore.createSession(documentA, session("write-safe"));
+    await assert.rejects(writeFailStore.saveImageAsset("https://example.test/write-fail.png"), /disk full/i);
+    assert.notEqual(await writeFailStore.getSession(documentA, "write-safe"), null);
+    assert.deepEqual(await readdir(path.join(baseDir, "chat-assets")).catch(() => []), []);
+
+    const reserveDir = path.join(baseDir, "reserve-fail");
+    const reserveFailStore = createChatStore({ baseDir: reserveDir, now: clock(), maxBytes: 700, fetch: imageFetch(bytes) });
+    await reserveFailStore.initialize();
+    await reserveFailStore.createSession(documentA, session("reserve-safe"));
+    await assert.rejects(reserveFailStore.saveImageAsset("https://example.test/reserve-fail.png"), /capacity exceeded/i);
+    assert.notEqual(await reserveFailStore.getSession(documentA, "reserve-safe"), null);
+    assert.deepEqual(await readdir(path.join(reserveDir, "chat-assets")).catch(() => []), []);
+  });
+});
+
+test("initialization enforces an over-limit history by pruning its oldest inactive session", async () => {
+  await withTempDir(async (baseDir) => {
+    const bytes = Buffer.alloc(300, 25);
+    const writer = createChatStore({ baseDir, now: clock(), maxBytes: 10000, fetch: imageFetch(bytes) });
+    await writer.initialize();
+    const image = await writer.saveImageAsset("https://example.test/startup.png");
+    await writer.createSession(documentA, session("startup-old"));
+    await writer.appendMessage(documentA, "startup-old", { ...message("startup-image", "user"), image });
+    await writer.createSession(documentA, session("startup-new"));
+    await writer.appendMessage(documentA, "startup-new", message("startup-new-message", "user", "complete", "new"));
+    const jsonSize = Buffer.byteLength(await readFile(path.join(baseDir, "chat-history-v1.json"), "utf8"));
+
+    const reloaded = createChatStore({ baseDir, now: clock(), maxBytes: jsonSize - 100 });
+    await reloaded.initialize();
+    assert.equal(await reloaded.getSession(documentA, "startup-old"), null);
+    assert.notEqual(await reloaded.getSession(documentA, "startup-new"), null);
+    await assert.rejects(fsPromises.stat(path.join(baseDir, image.storedPath)), { code: "ENOENT" });
+  });
+});
+
 test("each duplicate save keeps an independent pending image lease", async () => {
   await withTempDir(async (baseDir) => {
     const bytes = Buffer.from([17, 18]);
