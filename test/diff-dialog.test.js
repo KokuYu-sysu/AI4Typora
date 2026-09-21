@@ -8,6 +8,7 @@ class FakeElement {
     this.children = [];
     this.parentNode = null;
     this.dataset = {};
+    this.attributes = {};
     this.style = {};
     this.className = "";
     this.disabled = false;
@@ -21,11 +22,14 @@ class FakeElement {
   remove() { this.parentNode?.children.splice(this.parentNode.children.indexOf(this), 1); this.parentNode = null; }
   addEventListener(type, listener) { this.listeners.set(type, listener); }
   removeEventListener(type) { this.listeners.delete(type); }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  getAttribute(name) { return this.attributes[name] ?? null; }
   contains(node) { return this === node || this.children.some((child) => child.contains(node)); }
   closest(selector) { return selector === "[data-action='close']" && this.dataset.action === "close" ? this : null; }
   getBoundingClientRect() { return { left: 0, top: 0, width: 500, height: 300 }; }
   get offsetWidth() { return 500; }
   get offsetHeight() { return 300; }
+  focus() { this.focused = true; }
 
   set id(value) { this._id = value; }
   get id() { return this._id; }
@@ -45,14 +49,17 @@ class FakeElement {
 }
 
 function installFakeDom() {
+  const keyListeners = new Set();
   const document = {
     body: null,
     head: null,
     createElement(tagName) { return new FakeElement(tagName, document); },
     querySelector(selector) { return document.body.querySelector(selector) || document.head.querySelector(selector); },
     getElementById(id) { return document.querySelector(`#${id}`); },
-    addEventListener() {},
-    removeEventListener() {},
+    addEventListener(type, listener) { if (type === "keydown") keyListeners.add(listener); },
+    removeEventListener(type, listener) { if (type === "keydown") keyListeners.delete(listener); },
+    fireKey(event) { for (const listener of keyListeners) listener(event); },
+    getKeydownListenerCount() { return keyListeners.size; },
   };
   document.body = new FakeElement("body", document);
   document.head = new FakeElement("head", document);
@@ -110,11 +117,11 @@ test("stopped output ignores late stream and completion without enabling replace
   const dialog = createDiffDialog({
     title: "Rewrite",
     originalText: "old wording",
-    onStop() { stopped += 1; },
+    onStop() { stopped += 1; throw new Error("abort failed"); },
   });
   dialog.beginGeneration();
   dialog.setStreamingText("partial wording");
-  findAction(document.body, "stop").listeners.get("click")({ target: findAction(document.body, "stop") });
+  assert.doesNotThrow(() => findAction(document.body, "stop").listeners.get("click")({ target: findAction(document.body, "stop") }));
   dialog.setStreamingText("late wording");
   dialog.complete({ candidateText: "late completion", replaceAllowed: true });
 
@@ -122,6 +129,26 @@ test("stopped output ignores late stream and completion without enabling replace
   assert.equal(document.querySelector(".ai-edit-diff-output").textContent, "partial wording");
   assert.ok(findAction(document.body, "regenerate"));
   assert.equal(findAction(document.body, "replace"), null);
+});
+
+test("diff dialog has basic dialog semantics and removes Escape handling on close", () => {
+  const document = installFakeDom();
+  let closes = 0;
+  createDiffDialog({ title: "Rewrite", originalText: "old", onClose() { closes += 1; } });
+  const dialog = document.querySelector(".ai-edit-dialog");
+  const title = document.querySelector(".ai-edit-dialog-title");
+  const close = findAction(document.body, "close");
+  assert.equal(dialog.getAttribute("role"), "dialog");
+  assert.equal(dialog.getAttribute("aria-modal"), "true");
+  assert.equal(dialog.getAttribute("aria-labelledby"), title.id);
+  assert.equal(close.getAttribute("aria-label"), "Close dialog");
+  assert.equal(dialog.focused, true);
+  let prevented = false;
+  document.fireKey({ key: "Escape", preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.equal(closes, 1);
+  assert.equal(document.getElementById("ai-edit-dialog-overlay"), null);
+  assert.equal(document.getKeydownListenerCount(), 0);
 });
 
 test("invalid completion shows validation without an enabled replacement", () => {

@@ -3,6 +3,7 @@ import { ensureStyles, registerDialog, unregisterDialog } from "./ui.js";
 
 const COLLAPSE_AFTER = 600;
 const CONTEXT_LENGTH = 220;
+let dialogSequence = 0;
 
 function addElement(parent, tagName, className, text) {
   const element = document.createElement(tagName);
@@ -43,10 +44,17 @@ export function createDiffDialog(options) {
   overlay.id = "ai-edit-dialog-overlay";
   overlay.className = "ai-edit-overlay";
   const dialogElement = addElement(overlay, "div", "ai-edit-dialog");
+  const titleId = `ai-edit-diff-title-${++dialogSequence}`;
+  dialogElement.setAttribute("role", "dialog");
+  dialogElement.setAttribute("aria-modal", "true");
+  dialogElement.setAttribute("aria-labelledby", titleId);
+  dialogElement.tabIndex = -1;
   const header = addElement(dialogElement, "div", "ai-edit-dialog-header");
-  addElement(header, "div", "ai-edit-dialog-title", options.title || "Rewrite");
+  const title = addElement(header, "div", "ai-edit-dialog-title", options.title || "Rewrite");
+  title.id = titleId;
   const closeButton = addButton(header, "close", "×");
   closeButton.className = "ai-edit-dialog-close";
+  closeButton.setAttribute("aria-label", "Close dialog");
   const body = addElement(dialogElement, "div", "ai-edit-dialog-body");
   const output = addElement(body, "div", "ai-edit-diff-output");
   const validation = addElement(body, "div", "ai-edit-diff-validation");
@@ -60,6 +68,7 @@ export function createDiffDialog(options) {
   const lifecycle = { close };
   registerDialog(lifecycle);
   document.body.appendChild(overlay);
+  dialogElement.focus?.();
 
   function renderFooter(actions) {
     footer.replaceChildren();
@@ -127,6 +136,7 @@ export function createDiffDialog(options) {
   function close(reason = "close") {
     if (closed) return;
     closed = true;
+    document.removeEventListener("keydown", onKeyDown, true);
     overlay.remove();
     unregisterDialog(lifecycle);
     options.onClose?.({ reason, state, candidateText });
@@ -139,8 +149,10 @@ export function createDiffDialog(options) {
   function act(action) {
     if (action === "close") return close("close");
     if (action === "stop" && state === "generating") {
-      options.onStop?.();
       showStopped();
+      try {
+        options.onStop?.();
+      } catch (_) {}
       return;
     }
     if (action === "regenerate" && state !== "generating") return options.onRegenerate?.();
@@ -152,6 +164,12 @@ export function createDiffDialog(options) {
     if (event.target === overlay) close("overlay");
   });
   closeButton.addEventListener("click", () => act("close"));
+  function onKeyDown(event) {
+    if (event.key !== "Escape") return;
+    event.preventDefault?.();
+    close("escape");
+  }
+  document.addEventListener("keydown", onKeyDown, true);
 
   return { beginGeneration, setStreamingText, complete, fail, close };
 }
