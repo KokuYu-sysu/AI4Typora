@@ -46,6 +46,24 @@ test("cancelling a history clear does not call the store boundary", async () => 
   assert.equal(calls, 0);
 });
 
+test("a file switch while confirmation is open cannot clear either file", async () => {
+  const ui = controls(); const notices = []; let calls = 0; let settle;
+  let identity = { persistable: true, key: "first" };
+  bindChatHistoryControls(ui, {
+    getCurrentDocumentIdentity: () => identity,
+    async clearCurrentFileChatHistory() { calls += 1; },
+  }, {
+    confirm: () => new Promise((resolve) => { settle = resolve; }),
+    notify: (message) => notices.push(message),
+  });
+  const click = ui.current.click();
+  identity = { persistable: true, key: "second" };
+  settle(true);
+  await click;
+  assert.equal(calls, 0);
+  assert.deepEqual(notices, ["文件已切换，请重试"]);
+});
+
 test("confirmed current-file clear resets the open chat draft", async () => {
   const ui = controls(); const calls = []; const notices = [];
   const identity = { persistable: true, key: "doc" };

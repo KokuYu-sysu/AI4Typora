@@ -78,8 +78,13 @@ export function bindChatHistoryControls(container, plugin, {
       message: "This permanently deletes all AI conversations for the current file.",
       confirmText: "Clear history",
     })) return;
+    const currentIdentity = plugin.getCurrentDocumentIdentity?.();
+    if (!currentIdentity?.persistable || currentIdentity.key !== identity.key) {
+      notify("文件已切换，请重试");
+      return;
+    }
     try {
-      await plugin.clearCurrentFileChatHistory(identity);
+      await plugin.clearCurrentFileChatHistory(currentIdentity);
       notify("Current file chat history cleared.");
     } catch (error) {
       notify(`Could not clear current file history: ${error?.message || "Unknown error"}`);
