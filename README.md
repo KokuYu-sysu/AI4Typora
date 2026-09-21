@@ -122,7 +122,10 @@ key, and model settings in this provider section.
    - `AI Optimize (Selection Only)`
    - `AI Optimize (Use Full Document Context)`
 
-The plugin will show a result dialog. You can confirm to replace the selection.
+The plugin opens a Diff dialog that keeps the original selection visible while
+the candidate is generated. Deleted text is shown with a strike-through and
+new text is shown as an insertion. Unchanged context may be collapsed for
+readability.
 
 Responses are rendered incrementally as they arrive for both ChatGPT OAuth and
 OpenAI-compatible providers. The result dialog shows the generated text while
@@ -133,7 +136,24 @@ remains available for copying but the `Replace` action is disabled.
 
 ![rightclick.png](https://github.com/KokuYu-sysu/typora-gpt-edit/blob/main/asset/rightclick.png?raw=true)
 
-And it will return the revise suggestion, click `Replace` to do that:
+When generation completes, click `Replace` to apply the candidate in one step,
+`Copy` to copy it, or `Regenerate` to request another candidate. Every
+regeneration uses the original captured selection and instructions; it does
+not rewrite the previous candidate. `Regenerate` keeps the same Diff window
+open.
+
+`Stop` leaves the partial response visible, but a stopped response can only be
+copied, regenerated, or closed. It cannot be applied to the document. If the
+selection or active file changes while a response is being generated, the
+plugin rejects `Replace` and keeps the explanation in the Diff window. An
+unsaved document must be saved before a selection can be replaced.
+
+The Diff engine is implemented locally in JavaScript with no Python runtime,
+Diff package, or network round trip. It handles Unicode text and keeps formula
+spans intact as atomic units when they are part of the rewritten selection.
+
+The Diff window keeps the candidate available until you replace, copy,
+regenerate, or close it:
 ![](https://github.com/KokuYu-sysu/typora-gpt-edit/blob/854981fa4574014331d19f3da39d7ffeb7f8720e/asset/Revisement.png?raw=true)
 
 ### Ask writing questions
