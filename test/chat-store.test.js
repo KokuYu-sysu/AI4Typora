@@ -61,6 +61,18 @@ test("list is lazy and sessions stay isolated and newest-first", async () => {
   });
 });
 
+test("flush waits for pending history writes", async () => {
+  await withTempDir(async (baseDir) => {
+    const store = createChatStore({ baseDir, now: clock() });
+    await store.initialize();
+    void store.createSession(documentA, session("pending"));
+    await store.flush();
+    const reloaded = createChatStore({ baseDir });
+    await reloaded.initialize();
+    assert.equal((await reloaded.getSession(documentA, "pending"))?.id, "pending");
+  });
+});
+
 test("persists schema v1 and performs same-directory flush-close-rename", async () => {
   await withTempDir(async (baseDir) => {
     const events = [];

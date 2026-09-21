@@ -59,6 +59,16 @@ test("panel opens a blank draft, streams one assistant card, and inserts without
   panel.close(); assert.equal(panel.isOpen(), false);
 });
 
+test("opening an already visible panel starts a new blank draft and retains storage warnings", async () => {
+  const document = installDom(); const service = fakeService();
+  const panel = createChatPanel({ service, getDocumentIdentity: () => identity, warning: "History will not persist." });
+  await panel.open({ mode: "text" });
+  await panel.open({ mode: "image", pendingImage: { source: "image.png" } });
+  assert.equal(service.calls.filter((call) => call === "draft").length, 2);
+  assert.match(document.querySelector(".ai-edit-chat-error").textContent, /will not persist/i);
+  panel.close();
+});
+
 test("rail selects, renames, deletes and starts a separate blank draft", async () => {
   const document = installDom(); const service = fakeService();
   const panel = createChatPanel({ service, getDocumentIdentity: () => identity }); await panel.open();

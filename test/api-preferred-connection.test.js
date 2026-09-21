@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { abortCurrentRequest, callAi, callAiWithImage } from "../src/api.js";
+import { createAiRequest } from "../src/api.js";
 
 function createSseResponse(text) {
   const encoder = new TextEncoder();
@@ -46,7 +46,7 @@ function createSettings() {
   };
 }
 
-test("callAi keeps preferred connection ordering and normalizes a text message", async () => {
+test("createAiRequest keeps preferred connection ordering and normalizes a text message", async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];
   globalThis.fetch = async (url, options) => {
@@ -55,7 +55,11 @@ test("callAi keeps preferred connection ordering and normalizes a text message",
   };
 
   try {
-    const result = await callAi("sys", "user", createSettings(), {});
+    const result = await createAiRequest({
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "user" }],
+      settings: createSettings(),
+    }).promise;
     assert.equal(result, "preferred-ok");
     assert.equal(calls.length, 1);
     assert.ok(calls[0].url.startsWith("https://deepseek.example.com/chat/completions"));
@@ -68,7 +72,7 @@ test("callAi keeps preferred connection ordering and normalizes a text message",
   }
 });
 
-test("callAiWithImage normalizes one multimodal user message", async () => {
+test("createAiRequest normalizes one multimodal user message", async () => {
   const originalFetch = globalThis.fetch;
   let body;
   globalThis.fetch = async (_url, options) => {
@@ -77,13 +81,11 @@ test("callAiWithImage normalizes one multimodal user message", async () => {
   };
 
   try {
-    const result = await callAiWithImage(
-      "sys",
-      "describe",
-      "data:image/png;base64,AAA=",
-      createSettings(),
-      {},
-    );
+    const result = await createAiRequest({
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: "describe", imageInput: "data:image/png;base64,AAA=" }],
+      settings: createSettings(),
+    }).promise;
     assert.equal(result, "image-ok");
     assert.deepEqual(body.messages, [
       { role: "system", content: "sys" },
@@ -100,7 +102,7 @@ test("callAiWithImage normalizes one multimodal user message", async () => {
   }
 });
 
-test("an older legacy wrapper cannot clear the newer active request", async () => {
+test("concurrent request handles abort independently", async () => {
   const originalFetch = globalThis.fetch;
   const requests = [];
   globalThis.fetch = (_url, options) => new Promise((resolve, reject) => {
@@ -112,32 +114,25 @@ test("an older legacy wrapper cannot clear the newer active request", async () =
       reject(error);
     }, { once: true });
   });
-  let olderPromise;
-  let newerPromise;
+  let diffHandle;
+  let chatHandle;
 
   try {
-    olderPromise = callAi("sys", "older", createSettings(), {});
-    newerPromise = callAiWithImage(
-      "sys",
-      "newer",
-      "data:image/png;base64,AAA=",
-      createSettings(),
-      {},
-    );
+    diffHandle = createAiRequest({ systemPrompt: "sys", messages: [{ role: "user", content: "diff" }], settings: createSettings() });
+    chatHandle = createAiRequest({ systemPrompt: "sys", messages: [{ role: "user", content: "chat" }], settings: createSettings() });
     assert.equal(requests.length, 2);
 
-    requests[0].resolve(createSseResponse("older-ok"));
-    assert.equal(await olderPromise, "older-ok");
-
-    const newerRejected = assert.rejects(newerPromise, { name: "AbortError" });
-    abortCurrentRequest();
-    await newerRejected;
-
-    assert.equal(requests[0].signal.aborted, false);
-    assert.equal(requests[1].signal.aborted, true);
+    const diffRejected = assert.rejects(diffHandle.promise, { name: "AbortError" });
+    diffHandle.abort();
+    await diffRejected;
+    assert.equal(requests[0].signal.aborted, true);
+    assert.equal(requests[1].signal.aborted, false);
+    requests[1].resolve(createSseResponse("chat-ok"));
+    assert.equal(await chatHandle.promise, "chat-ok");
   } finally {
-    abortCurrentRequest();
-    await Promise.allSettled([olderPromise, newerPromise].filter(Boolean));
+    diffHandle?.abort();
+    chatHandle?.abort();
+    await Promise.allSettled([diffHandle?.promise, chatHandle?.promise].filter(Boolean));
     globalThis.fetch = originalFetch;
   }
 });

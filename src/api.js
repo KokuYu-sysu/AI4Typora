@@ -1,13 +1,6 @@
 import { getFreshToken } from "./platform.js";
 
 const CODEX_URL = "https://chatgpt.com/backend-api/codex/responses";
-let legacyActiveRequest = null;
-
-export function abortCurrentRequest() {
-  if (legacyActiveRequest) {
-    legacyActiveRequest.abort();
-  }
-}
 
 async function* readSseData(response) {
   const reader = response.body.getReader();
@@ -499,40 +492,4 @@ export function createAiRequest({
     promise,
     abort: () => controller.abort(),
   };
-}
-
-export async function callAi(systemPrompt, userPrompt, settings, handlers = {}) {
-  const handle = createAiRequest({
-    systemPrompt,
-    messages: [{ role: "user", content: userPrompt }],
-    settings,
-    onChunk: handlers.onChunk,
-    onAttemptStart: handlers.onAttemptStart,
-  });
-  legacyActiveRequest = handle;
-  try {
-    return await handle.promise;
-  } finally {
-    if (legacyActiveRequest === handle) {
-      legacyActiveRequest = null;
-    }
-  }
-}
-
-export async function callAiWithImage(systemPrompt, userPrompt, imageInput, settings, handlers = {}) {
-  const handle = createAiRequest({
-    systemPrompt,
-    messages: [{ role: "user", content: userPrompt, imageInput }],
-    settings,
-    onChunk: handlers.onChunk,
-    onAttemptStart: handlers.onAttemptStart,
-  });
-  legacyActiveRequest = handle;
-  try {
-    return await handle.promise;
-  } finally {
-    if (legacyActiveRequest === handle) {
-      legacyActiveRequest = null;
-    }
-  }
 }

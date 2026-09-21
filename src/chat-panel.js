@@ -15,7 +15,7 @@ function findAction(target) {
 }
 
 /** A deliberately plain-text, non-modal view of one ChatService. */
-export function createChatPanel({ service, getDocumentIdentity, onInsertAssistant, onCopy } = {}) {
+export function createChatPanel({ service, getDocumentIdentity, onInsertAssistant, onCopy, warning = "" } = {}) {
   if (!service || typeof getDocumentIdentity !== "function") throw new Error("Chat panel requires a chat service and document identity lookup.");
   let root = null;
   let unsubscribe = null;
@@ -126,7 +126,7 @@ export function createChatPanel({ service, getDocumentIdentity, onInsertAssistan
     input.disabled = streaming;
     root.querySelector("[data-action='send']").disabled = streaming;
     root.querySelector("[data-action='stop']").hidden = !streaming;
-    error.textContent = state.error || "";
+    error.textContent = [warning, state.error].filter(Boolean).join(" ");
   }
 
   function messageById(id) {
@@ -205,7 +205,7 @@ export function createChatPanel({ service, getDocumentIdentity, onInsertAssistan
   }
 
   async function open(options = {}) {
-    if (isOpen()) return refreshDocument();
+    if (isOpen()) return beginDraft(currentIdentity(), options);
     ensureStyles();
     root = element("aside", "ai-edit-chat-panel");
     root.setAttribute("role", "complementary");

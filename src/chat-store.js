@@ -838,6 +838,7 @@ export function createChatStore(options = {}) {
 
   return {
     initialize,
+    flush: ready,
 
     async listSessions(identity) {
       await ready();

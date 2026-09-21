@@ -360,9 +360,9 @@ export function createChatService({ store, createRequest, resolveSettings = () =
       const pendingImage = state.pendingImage;
       navigation += 1;
       abort();
-      void releasePending(pendingImage);
       listeners.clear();
       state = initialState();
+      return releasePending(pendingImage);
     },
     getState: () => clone(state),
   };

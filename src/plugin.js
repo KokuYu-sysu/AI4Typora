@@ -1,16 +1,80 @@
 ﻿const { Plugin, PluginSettings, Notice } = window[Symbol.for("typora-plugin-core@v2")];
 
-import { abortCurrentRequest, createAiRequest } from "./api.js";
+import { createAiRequest } from "./api.js";
+import { createChatPanel } from "./chat-panel.js";
+import { createChatService } from "./chat-service.js";
+import { createChatStore } from "./chat-store.js";
 import { DEFAULT_SETTINGS, mergeSettings, shortcutMatches } from "./config.js";
 import { createDiffDialog } from "./diff-dialog.js";
 import { getCurrentDocumentIdentity } from "./document-identity.js";
 import { EditorSelectionController } from "./editor.js";
-import { prepareImageInputForModel } from "./platform.js";
+import { getChatDataDirectory, prepareImageInputForModel } from "./platform.js";
 import { AiEditSettingTab } from "./settings-tab.js";
-import { ensureStyles, removeStyles, showToast, openContextMenu, closeContextMenu, promptForText, createStreamDialog, closeAnyDialog } from "./ui.js";
+import { ensureStyles, removeStyles, showToast, openContextMenu, closeContextMenu, promptForText, closeAnyDialog } from "./ui.js";
 import { protectMath, restoreMathPreview, restoreMath } from "./math-protection.js";
 
 let unsavedRewriteSequence = 0;
+
+function clone(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+// Keeps chat usable when the host cannot provide persistent storage.
+function createVolatileChatStore() {
+  const documents = new Map();
+  const images = new Map();
+  const sessionsFor = (identity, create = false) => {
+    if (!documents.has(identity.key) && create) documents.set(identity.key, []);
+    return documents.get(identity.key) || [];
+  };
+  const find = (identity, id) => sessionsFor(identity).find((session) => session.id === id);
+  return {
+    async initialize() {},
+    async flush() {},
+    async listSessions(identity) {
+      return sessionsFor(identity).map(({ messages, ...session }) => ({ ...clone(session), messageCount: messages.length })).reverse();
+    },
+    async getSession(identity, id) { return clone(find(identity, id) || null); },
+    async createSession(identity, input) {
+      const session = { ...clone(input), messages: clone(input.messages || []) };
+      sessionsFor(identity, true).push(session);
+      return clone(session);
+    },
+    async appendMessage(identity, id, message) {
+      const session = find(identity, id);
+      if (!session) throw new Error("Chat session not found.");
+      session.messages.push(clone(message));
+      session.updatedAt = message.createdAt || new Date().toISOString();
+      return clone(session);
+    },
+    async updateMessage(identity, id, messageId, patch) {
+      const session = find(identity, id);
+      const message = session?.messages.find((item) => item.id === messageId);
+      if (!message) throw new Error("Chat message not found.");
+      Object.assign(message, clone(patch));
+      return clone(session);
+    },
+    async renameSession(identity, id, title) { const session = find(identity, id); if (session) session.title = title; },
+    async deleteSession(identity, id) {
+      const sessions = sessionsFor(identity);
+      const index = sessions.findIndex((session) => session.id === id);
+      if (index >= 0) sessions.splice(index, 1);
+    },
+    async clearDocument(identity) { documents.delete(identity.key); },
+    async clearAll() { documents.clear(); images.clear(); },
+    async saveImageAsset(source) {
+      const assetId = `volatile_${images.size + 1}`;
+      images.set(assetId, prepareImageInputForModel(source));
+      return { assetId, originalSource: String(source), mimeType: "image/png", storedPath: "", fallbackUrl: "" };
+    },
+    async resolveImageAsset(image) {
+      const value = images.get(image?.assetId);
+      if (!value) throw new Error("Temporary image data is unavailable.");
+      return value;
+    },
+    async releaseImageAsset(image) { images.delete(image?.assetId); },
+  };
+}
 
 export function prepareContextRewrite(selectedText, promptTemplate, documentText) {
   const protectedSelection = protectMath(selectedText);
@@ -131,6 +195,17 @@ export default class AiEditPlugin extends Plugin {
   constructor() {
     super(...arguments);
     this.editorSelection = new EditorSelectionController();
+    this.chatRuntime = {
+      createStore: createChatStore,
+      createService: createChatService,
+      createPanel: createChatPanel,
+      createRequest: createAiRequest,
+      getDataDirectory: getChatDataDirectory,
+      getDocumentIdentity: getCurrentDocumentIdentity,
+    };
+    this.chatStore = null;
+    this.chatService = null;
+    this.chatPanel = null;
     this.bypassNextContextMenu = false;
     this.handleContextMenu = this.handleContextMenu.bind(this);
     this.handleKeyDown = this.handleKeyDown.bind(this);
@@ -143,6 +218,50 @@ export default class AiEditPlugin extends Plugin {
     this.settings.setDefault(DEFAULT_SETTINGS);
     this.registerSettingTab(new AiEditSettingTab(this));
     ensureStyles();
+    let warning = "";
+    try {
+      this.chatStore = this.chatRuntime.createStore({ baseDir: this.chatRuntime.getDataDirectory() });
+      await this.chatStore.initialize();
+    } catch (error) {
+      warning = `Chat history is unavailable and will not persist: ${error?.message || error}`;
+      this.chatStore = createVolatileChatStore();
+      await this.chatStore.initialize();
+      showToast(warning, "error");
+    }
+    this.chatService = this.chatRuntime.createService({
+      store: this.chatStore,
+      resolveSettings: () => this.getSettings(),
+      createRequest: (request) => this.chatRuntime.createRequest({
+        ...request,
+        settings: request.settings || this.getSettings(),
+      }),
+    });
+    this.chatPanel = this.chatRuntime.createPanel({
+      service: this.chatService,
+      getDocumentIdentity: () => this.chatRuntime.getDocumentIdentity(),
+      warning,
+      onCopy: async (text) => {
+        const copied = await this.copyTextToClipboard(text);
+        showToast(copied ? "Copied to clipboard." : "Copy failed. Please copy manually.", copied ? "success" : "error");
+        return copied;
+      },
+      onInsertAssistant: (text) => {
+        const result = this.editorSelection.insertMarkdownAtLastCaret(text);
+        if (result.ok) {
+          showToast("Inserted at the last editor caret.", "success");
+        } else {
+          const reasons = {
+            "document-unsaved": "Save the document before inserting.",
+            "document-changed": "The document changed. Place the caret again and retry.",
+            "no-caret": "Place the caret in the editor and retry.",
+            "no-valid-caret": "The saved caret is no longer available. Place it again and retry.",
+          };
+          showToast(reasons[result.reason] || "Could not insert the response. Place the caret and retry.", "error");
+        }
+        return result;
+      },
+    });
+    this.editorSelection.startCaretTracking(() => this.chatRuntime.getDocumentIdentity());
     document.addEventListener("contextmenu", this.handleContextMenu, true);
     document.addEventListener("keydown", this.handleKeyDown, true);
     new Notice("AI Edit loaded. Shortcuts: Ctrl+E (Q&A), Ctrl+R (optimize), Ctrl+Shift+R (optimize with context).");
@@ -151,10 +270,16 @@ export default class AiEditPlugin extends Plugin {
   onunload() {
     document.removeEventListener("contextmenu", this.handleContextMenu, true);
     document.removeEventListener("keydown", this.handleKeyDown, true);
-    abortCurrentRequest();
+    this.chatService?.stop();
+    this.chatPanel?.close();
+    this.editorSelection.stopCaretTracking();
     closeContextMenu();
     closeAnyDialog();
     removeStyles();
+    const disposing = this.chatService?.dispose?.();
+    return Promise.resolve(disposing)
+      .then(() => this.chatStore?.flush?.())
+      .catch(() => {});
   }
 
   getSettings() {
@@ -345,12 +470,6 @@ export default class AiEditPlugin extends Plugin {
     }, 0);
   }
 
-  scheduleRestoreCaret() {
-    window.setTimeout(() => {
-      this.editorSelection.restoreInsertionCaret();
-    }, 40);
-  }
-
   copyTextFallback(text) {
     try {
       const area = document.createElement("textarea");
@@ -403,30 +522,6 @@ export default class AiEditPlugin extends Plugin {
       }
     } catch (_) {}
     return this.copyTextFallback(content);
-  }
-
-  async copyResponseAndAutoPaste(stream, value) {
-    const content = String(value || "").trim();
-    if (!content) {
-      stream.close("confirm");
-      showToast("Nothing to copy.", "error");
-      return;
-    }
-
-    const copied = await this.copyTextToClipboard(content);
-    stream.close("confirm");
-    window.setTimeout(async () => {
-      const pasted = await this.editorSelection.autoPasteResponse(content);
-      if (pasted) {
-        showToast("Copied and auto-pasted at cursor.", "success");
-        return;
-      }
-
-      showToast(
-        copied ? "Copied. Auto paste blocked, please press Ctrl+V." : "Copy failed. Please copy manually.",
-        copied ? "info" : "error",
-      );
-    }, 60);
   }
 
   async openOptimizeFlow(withContext) {
@@ -561,132 +656,7 @@ export default class AiEditPlugin extends Plugin {
   }
 
   async openQaFlow() {
-    const question = await promptForText({
-      title: "AI Q&A",
-      label: "Enter your question",
-      placeholder: "For example: suggest a stronger transition sentence for the current section.",
-      confirmText: "Start",
-    });
-    if (!question) {
-      return;
-    }
-
-    const includeContext = await promptForText({
-      title: "AI Q&A",
-      label: "Type YES to include the full document as context, or leave blank to answer without it.",
-      placeholder: "YES",
-      confirmText: "Continue",
-    });
-    if (includeContext === null) {
-      return;
-    }
-
-    const settings = this.getSettings();
-    const withContext = String(includeContext || "").trim().toLowerCase() === "yes";
-    const promptKey = withContext ? "qa_with_context" : "qa";
-    const promptConfig = settings.prompts[promptKey];
-    const userPrompt = promptConfig.user
-      .replace(/\{question\}/g, question)
-      .replace(/\{document\}/g, withContext ? this.editorSelection.getDocumentText() : "");
-
-    let activeRequest = null;
-    let generating = true;
-    let stopped = false;
-    let stoppedCompleted = false;
-    let closed = false;
-
-    const stream = createStreamDialog({
-      title: "AI Q&A",
-      waitingText: "Waiting for AI response...",
-      onStop: () => {
-        if (!generating || stopped) {
-          return;
-        }
-        stopped = true;
-        activeRequest?.abort();
-      },
-      onClose: (meta) => {
-        closed = true;
-        if (generating) {
-          activeRequest?.abort();
-        }
-        if (meta?.reason !== "confirm") {
-          this.scheduleRestoreCaret();
-        }
-      },
-    });
-
-    function showStoppedCompletion() {
-      if (stoppedCompleted) {
-        return;
-      }
-      stoppedCompleted = true;
-      stream.showCompleted({
-        replaceAllowed: false,
-        validationMessage: "Request stopped. Partial response is available to copy.",
-      });
-    }
-
-    try {
-      const request = createAiRequest({
-        systemPrompt: promptConfig.system,
-        messages: [{ role: "user", content: userPrompt }],
-        settings,
-        onChunk: (chunk) => {
-          if (!closed && !stopped) {
-            stream.append(chunk);
-          }
-        },
-        onAttemptStart: ({ resetOutput }) => {
-          if (!closed && !stopped && resetOutput) {
-            stream.setValue("");
-          }
-        },
-      });
-      activeRequest = request;
-      const result = await request.promise;
-      if (activeRequest === request) {
-        activeRequest = null;
-      }
-      generating = false;
-      if (closed) {
-        return;
-      }
-      if (stopped) {
-        showStoppedCompletion();
-        return;
-      }
-      if (!result.trim()) {
-        stream.showError("The model returned an empty response.");
-        return;
-      }
-      stream.showCompleted({
-        confirmText: "Copy & Auto Paste",
-        onConfirm: async (value) => {
-          await this.copyResponseAndAutoPaste(stream, value);
-        },
-      });
-    } catch (error) {
-      activeRequest = null;
-      generating = false;
-      if (closed) {
-        return;
-      }
-      if (error && error.name === "AbortError") {
-        if (stopped) {
-          showStoppedCompletion();
-          return;
-        }
-        stream.showCompleted({
-          confirmText: "Copy & Auto Paste",
-          onConfirm: async (value) => {
-            await this.copyResponseAndAutoPaste(stream, value);
-          },
-        });
-      } else {
-        stream.showError(error?.message || "The request failed.");
-      }
-    }
+    return this.chatPanel?.open({ mode: "text" });
   }
 
   async openImageQaFlow(imageElement) {
@@ -700,129 +670,6 @@ export default class AiEditPlugin extends Plugin {
       showToast("Cannot read image source from the selected image.", "error");
       return;
     }
-
-    const question = await promptForText({
-      title: "AI Image Q&A",
-      label: "Ask a question about this image",
-      placeholder: "For example: explain the key findings shown in this figure.",
-      confirmText: "Start",
-    });
-    if (!question) {
-      return;
-    }
-
-    let imageInput;
-    try {
-      imageInput = prepareImageInputForModel(imageSource);
-    } catch (error) {
-      showToast(error?.message || "Image preprocessing failed.", "error");
-      return;
-    }
-
-    const settings = this.getSettings();
-    const promptConfig = settings.prompts.image_qa || {
-      system: "You are an image interpretation assistant.",
-      user: "Answer based on the image.\n\nQuestion: {question}",
-    };
-    const userPrompt = promptConfig.user.replace(/\{question\}/g, question);
-
-    let activeRequest = null;
-    let generating = true;
-    let stopped = false;
-    let stoppedCompleted = false;
-    let closed = false;
-
-    const stream = createStreamDialog({
-      title: "AI Image Q&A",
-      waitingText: "Waiting for AI response...",
-      onStop: () => {
-        if (!generating || stopped) {
-          return;
-        }
-        stopped = true;
-        activeRequest?.abort();
-      },
-      onClose: (meta) => {
-        closed = true;
-        if (generating) {
-          activeRequest?.abort();
-        }
-        if (meta?.reason !== "confirm") {
-          this.scheduleRestoreCaret();
-        }
-      },
-    });
-
-    function showStoppedCompletion() {
-      if (stoppedCompleted) {
-        return;
-      }
-      stoppedCompleted = true;
-      stream.showCompleted({
-        replaceAllowed: false,
-        validationMessage: "Request stopped. Partial response is available to copy.",
-      });
-    }
-
-    try {
-      const request = createAiRequest({
-        systemPrompt: promptConfig.system,
-        messages: [{ role: "user", content: userPrompt, imageInput }],
-        settings,
-        onChunk: (chunk) => {
-          if (!closed && !stopped) {
-            stream.append(chunk);
-          }
-        },
-        onAttemptStart: ({ resetOutput }) => {
-          if (!closed && !stopped && resetOutput) {
-            stream.setValue("");
-          }
-        },
-      });
-      activeRequest = request;
-      const result = await request.promise;
-      if (activeRequest === request) {
-        activeRequest = null;
-      }
-      generating = false;
-      if (closed) {
-        return;
-      }
-      if (stopped) {
-        showStoppedCompletion();
-        return;
-      }
-      if (!result.trim()) {
-        stream.showError("The model returned an empty response.");
-        return;
-      }
-      stream.showCompleted({
-        confirmText: "Copy & Auto Paste",
-        onConfirm: async (value) => {
-          await this.copyResponseAndAutoPaste(stream, value);
-        },
-      });
-    } catch (error) {
-      activeRequest = null;
-      generating = false;
-      if (closed) {
-        return;
-      }
-      if (error && error.name === "AbortError") {
-        if (stopped) {
-          showStoppedCompletion();
-          return;
-        }
-        stream.showCompleted({
-          confirmText: "Copy & Auto Paste",
-          onConfirm: async (value) => {
-            await this.copyResponseAndAutoPaste(stream, value);
-          },
-        });
-      } else {
-        stream.showError(error?.message || "The request failed.");
-      }
-    }
+    return this.chatPanel?.open({ mode: "image", pendingImage: { source: imageSource } });
   }
 }
