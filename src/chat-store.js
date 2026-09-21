@@ -3,6 +3,7 @@ const STORE_FILENAME = "chat-history-v1.json";
 const DEFAULT_MAX_BYTES = 100 * 1024 * 1024;
 const MAX_SESSIONS_PER_DOCUMENT = 100;
 const MAX_MESSAGES_PER_SESSION = 200;
+const DOCUMENT_KEY_PATTERN = /^doc_[a-f0-9]{32}$/;
 
 function getNodeModule(name) {
   try {
@@ -21,6 +22,30 @@ function getNodeModule(name) {
 
 function copy(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasString(record, key) {
+  return Object.hasOwn(record, key) && typeof record[key] === "string";
+}
+
+function hasId(record, key = "id") {
+  return hasString(record, key) && record[key].trim().length > 0;
+}
+
+function hasTimestamp(record, key) {
+  if (!hasString(record, key)) return false;
+  const timestamp = new Date(record[key]);
+  return !Number.isNaN(timestamp.getTime()) && timestamp.toISOString() === record[key];
+}
+
+function assertId(value, label) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new TypeError(`${label} must be a non-empty string.`);
+  }
 }
 
 function isStreaming(session) {
@@ -70,6 +95,7 @@ function pruneDocumentSessions(document) {
     if (!candidate) break;
     document.sessions.splice(document.sessions.indexOf(candidate), 1);
   }
+  return document.sessions.length <= MAX_SESSIONS_PER_DOCUMENT;
 }
 
 function serialized(database) {
@@ -90,17 +116,54 @@ function pruneGlobal(database, maxBytes) {
     document.sessions.splice(document.sessions.indexOf(candidate.session), 1);
     if (document.sessions.length === 0) delete database.documents[candidate.documentKey];
   }
+  return Buffer.byteLength(serialized(database), "utf8") <= maxBytes;
 }
 
 function assertDocumentIdentity(identity) {
-  if (!identity?.persistable || !identity.key || !identity.path) {
+  if (!isRecord(identity) || !identity.persistable
+    || typeof identity.key !== "string" || !DOCUMENT_KEY_PATTERN.test(identity.key)
+    || typeof identity.path !== "string" || !identity.path
+    || typeof identity.label !== "string") {
     throw new Error("Chat history requires a saved Markdown document.");
   }
 }
 
 function assertRecord(value, label) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (!isRecord(value)) {
     throw new TypeError(`${label} must be an object.`);
+  }
+}
+
+function validateMessage(message) {
+  if (!isRecord(message) || !hasId(message) || !hasString(message, "role")
+    || !hasString(message, "content") || !hasTimestamp(message, "createdAt")
+    || !hasString(message, "status")
+    || (Object.hasOwn(message, "image") && !isRecord(message.image))) {
+    throw new Error("Chat history contains an invalid message.");
+  }
+}
+
+function validateSession(session) {
+  if (!isRecord(session) || !hasId(session) || !hasString(session, "title")
+    || !hasString(session, "mode") || !hasTimestamp(session, "createdAt")
+    || !hasTimestamp(session, "updatedAt") || !Array.isArray(session.messages)) {
+    throw new Error("Chat history contains an invalid session.");
+  }
+  session.messages.forEach(validateMessage);
+}
+
+function validateDatabase(value) {
+  if (!isRecord(value) || !Object.hasOwn(value, "version") || value.version !== STORE_VERSION
+    || !Object.hasOwn(value, "documents") || !isRecord(value.documents)) {
+    throw new Error("Chat history schema v1 is invalid.");
+  }
+  for (const [key, document] of Object.entries(value.documents)) {
+    if (!DOCUMENT_KEY_PATTERN.test(key) || !isRecord(document)
+      || !hasString(document, "path") || !hasString(document, "label")
+      || !hasTimestamp(document, "lastAccessedAt") || !Array.isArray(document.sessions)) {
+      throw new Error("Chat history contains an invalid document.");
+    }
+    document.sessions.forEach(validateSession);
   }
 }
 
@@ -158,6 +221,10 @@ export function createChatStore(options = {}) {
     try {
       parsed = JSON.parse(text);
     } catch (_) {
+      parsed = null;
+    }
+
+    if (!parsed || typeof parsed !== "object") {
       const suffix = timestamp().replace(/[:.]/g, "-");
       const corruptPath = path.join(baseDir, `chat-history-v1.corrupt-${suffix}.json`);
       await fs.rename(mainPath, corruptPath);
@@ -165,11 +232,17 @@ export function createChatStore(options = {}) {
       return;
     }
 
-    if (parsed?.version !== STORE_VERSION) {
+    if (typeof parsed.version === "number" && parsed.version > STORE_VERSION) {
       throw new Error(`Unsupported chat history schema version ${String(parsed?.version)}.`);
     }
-    if (!parsed.documents || typeof parsed.documents !== "object" || Array.isArray(parsed.documents)) {
-      throw new Error("Chat history schema v1 is invalid.");
+    try {
+      validateDatabase(parsed);
+    } catch (_) {
+      const suffix = timestamp().replace(/[:.]/g, "-");
+      const corruptPath = path.join(baseDir, `chat-history-v1.corrupt-${suffix}.json`);
+      await fs.rename(mainPath, corruptPath);
+      await removeStaleTemp();
+      return;
     }
     database = parsed;
     await removeStaleTemp();
@@ -199,9 +272,13 @@ export function createChatStore(options = {}) {
   function retain(nextDatabase) {
     for (const document of Object.values(nextDatabase.documents)) {
       for (const session of document.sessions) pruneMessages(session);
-      pruneDocumentSessions(document);
+      if (!pruneDocumentSessions(document)) {
+        throw new Error("Chat history capacity exceeded: active sessions cannot be pruned.");
+      }
     }
-    pruneGlobal(nextDatabase, maxBytes);
+    if (!pruneGlobal(nextDatabase, maxBytes)) {
+      throw new Error("Chat history capacity exceeded: active content exceeds the storage limit.");
+    }
   }
 
   async function ready() {
@@ -209,12 +286,15 @@ export function createChatStore(options = {}) {
     await writeQueue;
   }
 
-  function mutate(change) {
+  function mutate(change, assertRetained) {
     const operation = writeQueue.then(async () => {
       if (!initialized) await initialize();
       const nextDatabase = copy(database);
       const result = change(nextDatabase);
       retain(nextDatabase);
+      if (assertRetained && !assertRetained(nextDatabase, result)) {
+        throw new Error("Chat history capacity exceeded: the changed session cannot be retained.");
+      }
       await writeJsonAtomically(nextDatabase);
       database = nextDatabase;
       return copy(result);
@@ -225,7 +305,9 @@ export function createChatStore(options = {}) {
 
   function documentFor(nextDatabase, identity, create = false) {
     assertDocumentIdentity(identity);
-    let document = nextDatabase.documents[identity.key];
+    let document = Object.hasOwn(nextDatabase.documents, identity.key)
+      ? nextDatabase.documents[identity.key]
+      : null;
     if (!document && create) {
       document = {
         path: identity.path,
@@ -249,13 +331,45 @@ export function createChatStore(options = {}) {
     return session;
   }
 
+  function snapshot(value, label) {
+    try {
+      return copy(value);
+    } catch (_) {
+      throw new TypeError(`${label} must be JSON-compatible.`);
+    }
+  }
+
+  function assertOptionalId(value, key, label) {
+    if (Object.hasOwn(value, key)) assertId(value[key], label);
+  }
+
+  function assertOptionalTimestamp(value, key, label) {
+    if (Object.hasOwn(value, key) && !hasTimestamp(value, key)) {
+      throw new TypeError(`${label} must be an ISO timestamp.`);
+    }
+  }
+
+  function assertOptionalString(value, key, label) {
+    if (Object.hasOwn(value, key) && typeof value[key] !== "string") {
+      throw new TypeError(`${label} must be a string.`);
+    }
+  }
+
+  function sessionIsRetained(nextDatabase, identity, sessionId) {
+    return Boolean(findSession(nextDatabase, identity, sessionId));
+  }
+
   return {
     initialize,
 
     async listSessions(identity) {
       await ready();
       if (!identity?.persistable) return [];
-      const document = database.documents[identity.key];
+      const safeIdentity = snapshot(identity, "Document identity");
+      assertDocumentIdentity(safeIdentity);
+      const document = Object.hasOwn(database.documents, safeIdentity.key)
+        ? database.documents[safeIdentity.key]
+        : null;
       if (!document) return [];
       return document.sessions
         .map(({ messages, ...session }) => ({ ...session, messageCount: messages.length }))
@@ -266,21 +380,37 @@ export function createChatStore(options = {}) {
     async getSession(identity, sessionId) {
       await ready();
       if (!identity?.persistable) return null;
-      return copy(findSession(database, identity, sessionId));
+      const safeIdentity = snapshot(identity, "Document identity");
+      const safeSessionId = snapshot(sessionId, "Chat session ID");
+      assertDocumentIdentity(safeIdentity);
+      assertId(safeSessionId, "Chat session ID");
+      return copy(findSession(database, safeIdentity, safeSessionId));
     },
 
     createSession(identity, input) {
-      assertRecord(input, "Chat session");
+      const safeIdentity = snapshot(identity, "Document identity");
+      const safeInput = snapshot(input, "Chat session");
+      assertDocumentIdentity(safeIdentity);
+      assertRecord(safeInput, "Chat session");
+      assertOptionalId(safeInput, "id", "Chat session ID");
+      assertOptionalString(safeInput, "title", "Chat session title");
+      assertOptionalString(safeInput, "mode", "Chat session mode");
+      assertOptionalTimestamp(safeInput, "createdAt", "Chat session createdAt");
+      assertOptionalTimestamp(safeInput, "updatedAt", "Chat session updatedAt");
+      if (Object.hasOwn(safeInput, "messages")) {
+        if (!Array.isArray(safeInput.messages)) throw new TypeError("Chat session messages must be an array.");
+        safeInput.messages.forEach(validateMessage);
+      }
       return mutate((nextDatabase) => {
-        const document = documentFor(nextDatabase, identity, true);
-        const createdAt = input.createdAt || timestamp();
+        const document = documentFor(nextDatabase, safeIdentity, true);
+        const createdAt = safeInput.createdAt || timestamp();
         const value = {
-          id: input.id || createId("session"),
-          title: String(input.title || "New chat"),
-          mode: String(input.mode || "text"),
+          id: safeInput.id || createId("session"),
+          title: safeInput.title || "New chat",
+          mode: safeInput.mode || "text",
           createdAt,
-          updatedAt: input.updatedAt || createdAt,
-          messages: Array.isArray(input.messages) ? copy(input.messages) : [],
+          updatedAt: safeInput.updatedAt || createdAt,
+          messages: Array.isArray(safeInput.messages) ? copy(safeInput.messages) : [],
         };
         if (document.sessions.some((session) => session.id === value.id)) {
           throw new Error(`Chat session already exists: ${value.id}`);
@@ -288,21 +418,34 @@ export function createChatStore(options = {}) {
         document.sessions.push(value);
         document.lastAccessedAt = value.updatedAt;
         return value;
-      });
+      }, (nextDatabase, value) => sessionIsRetained(nextDatabase, safeIdentity, value.id));
     },
 
     appendMessage(identity, sessionId, input) {
-      assertRecord(input, "Chat message");
+      const safeIdentity = snapshot(identity, "Document identity");
+      const safeSessionId = snapshot(sessionId, "Chat session ID");
+      const safeInput = snapshot(input, "Chat message");
+      assertDocumentIdentity(safeIdentity);
+      assertId(safeSessionId, "Chat session ID");
+      assertRecord(safeInput, "Chat message");
+      assertOptionalId(safeInput, "id", "Chat message ID");
+      assertOptionalString(safeInput, "role", "Chat message role");
+      assertOptionalString(safeInput, "content", "Chat message content");
+      assertOptionalString(safeInput, "status", "Chat message status");
+      assertOptionalTimestamp(safeInput, "createdAt", "Chat message createdAt");
+      if (Object.hasOwn(safeInput, "image") && !isRecord(safeInput.image)) {
+        throw new TypeError("Chat message image must be an object.");
+      }
       return mutate((nextDatabase) => {
-        const document = documentFor(nextDatabase, identity);
-        const session = requireSession(nextDatabase, identity, sessionId);
+        const document = documentFor(nextDatabase, safeIdentity);
+        const session = requireSession(nextDatabase, safeIdentity, safeSessionId);
         const value = {
-          id: input.id || createId("message"),
-          role: String(input.role || ""),
-          content: String(input.content || ""),
-          createdAt: input.createdAt || timestamp(),
-          status: String(input.status || "complete"),
-          ...(input.image ? { image: copy(input.image) } : {}),
+          id: safeInput.id || createId("message"),
+          role: safeInput.role || "",
+          content: safeInput.content || "",
+          createdAt: safeInput.createdAt || timestamp(),
+          status: safeInput.status || "complete",
+          ...(Object.hasOwn(safeInput, "image") ? { image: copy(safeInput.image) } : {}),
         };
         if (!value.role) throw new Error("Chat message role is required.");
         if (session.messages.some((message) => message.id === value.id)) {
@@ -312,49 +455,72 @@ export function createChatStore(options = {}) {
         session.updatedAt = timestamp();
         document.lastAccessedAt = session.updatedAt;
         return session;
-      });
+      }, (nextDatabase) => sessionIsRetained(nextDatabase, safeIdentity, safeSessionId));
     },
 
     updateMessage(identity, sessionId, messageId, patch) {
-      assertRecord(patch, "Chat message patch");
+      const safeIdentity = snapshot(identity, "Document identity");
+      const safeSessionId = snapshot(sessionId, "Chat session ID");
+      const safeMessageId = snapshot(messageId, "Chat message ID");
+      const safePatch = snapshot(patch, "Chat message patch");
+      assertDocumentIdentity(safeIdentity);
+      assertId(safeSessionId, "Chat session ID");
+      assertId(safeMessageId, "Chat message ID");
+      assertRecord(safePatch, "Chat message patch");
+      assertOptionalString(safePatch, "content", "Chat message content");
+      assertOptionalString(safePatch, "status", "Chat message status");
+      if (Object.hasOwn(safePatch, "image") && !isRecord(safePatch.image)) {
+        throw new TypeError("Chat message image must be an object.");
+      }
       return mutate((nextDatabase) => {
-        const document = documentFor(nextDatabase, identity);
-        const session = requireSession(nextDatabase, identity, sessionId);
-        const message = session.messages.find((candidate) => candidate.id === messageId);
-        if (!message) throw new Error(`Chat message not found: ${messageId}`);
+        const document = documentFor(nextDatabase, safeIdentity);
+        const session = requireSession(nextDatabase, safeIdentity, safeSessionId);
+        const message = session.messages.find((candidate) => candidate.id === safeMessageId);
+        if (!message) throw new Error(`Chat message not found: ${safeMessageId}`);
         for (const key of ["content", "status", "image"]) {
-          if (Object.hasOwn(patch, key)) message[key] = copy(patch[key]);
+          if (Object.hasOwn(safePatch, key)) message[key] = copy(safePatch[key]);
         }
         session.updatedAt = timestamp();
         document.lastAccessedAt = session.updatedAt;
         return session;
-      });
+      }, (nextDatabase) => sessionIsRetained(nextDatabase, safeIdentity, safeSessionId));
     },
 
     renameSession(identity, sessionId, title) {
+      const safeIdentity = snapshot(identity, "Document identity");
+      const safeSessionId = snapshot(sessionId, "Chat session ID");
+      const safeTitle = snapshot(title, "Chat session title");
+      assertDocumentIdentity(safeIdentity);
+      assertId(safeSessionId, "Chat session ID");
+      assertOptionalString({ title: safeTitle }, "title", "Chat session title");
       return mutate((nextDatabase) => {
-        const document = documentFor(nextDatabase, identity);
-        const session = requireSession(nextDatabase, identity, sessionId);
-        session.title = String(title || "New chat");
+        const document = documentFor(nextDatabase, safeIdentity);
+        const session = requireSession(nextDatabase, safeIdentity, safeSessionId);
+        session.title = safeTitle || "New chat";
         session.updatedAt = timestamp();
         document.lastAccessedAt = session.updatedAt;
-      });
+      }, (nextDatabase) => sessionIsRetained(nextDatabase, safeIdentity, safeSessionId));
     },
 
     deleteSession(identity, sessionId) {
+      const safeIdentity = snapshot(identity, "Document identity");
+      const safeSessionId = snapshot(sessionId, "Chat session ID");
+      assertDocumentIdentity(safeIdentity);
+      assertId(safeSessionId, "Chat session ID");
       return mutate((nextDatabase) => {
-        const document = documentFor(nextDatabase, identity);
+        const document = documentFor(nextDatabase, safeIdentity);
         if (!document) return;
-        const index = document.sessions.findIndex((session) => session.id === sessionId);
+        const index = document.sessions.findIndex((session) => session.id === safeSessionId);
         if (index >= 0) document.sessions.splice(index, 1);
         document.lastAccessedAt = timestamp();
       });
     },
 
     clearDocument(identity) {
+      const safeIdentity = snapshot(identity, "Document identity");
+      assertDocumentIdentity(safeIdentity);
       return mutate((nextDatabase) => {
-        assertDocumentIdentity(identity);
-        delete nextDatabase.documents[identity.key];
+        delete nextDatabase.documents[safeIdentity.key];
       });
     },
 

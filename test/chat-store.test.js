@@ -10,13 +10,13 @@ import { getChatDataDirectory } from "../src/platform.js";
 
 const documentA = {
   persistable: true,
-  key: "doc_a",
+  key: `doc_${"a".repeat(32)}`,
   path: "c:\\notes\\a.md",
   label: "a.md",
 };
 const documentB = {
   persistable: true,
-  key: "doc_b",
+  key: `doc_${"b".repeat(32)}`,
   path: "c:\\notes\\b.md",
   label: "b.md",
 };
@@ -40,7 +40,7 @@ function session(id, overrides = {}) {
 }
 
 function message(id, role, status = "complete", content = id) {
-  return { id, role, status, content };
+  return { id, role, status, content, createdAt: "2026-09-21T00:00:00.000Z" };
 }
 
 test("list is lazy and sessions stay isolated and newest-first", async () => {
@@ -101,7 +101,7 @@ test("persists schema v1 and performs same-directory flush-close-rename", async 
 
     const payload = JSON.parse(await readFile(mainPath, "utf8"));
     assert.equal(payload.version, 1);
-    assert.equal(payload.documents.doc_a.path, documentA.path);
+    assert.equal(payload.documents[documentA.key].path, documentA.path);
 
     const reloaded = createChatStore({ baseDir, now: clock() });
     await reloaded.initialize();
@@ -123,6 +123,40 @@ test("backs up corrupt JSON and remains usable", async () => {
     assert.deepEqual(await readdir(baseDir), ["chat-history-v1.corrupt-2026-09-21T01-02-03-004Z.json"]);
     await store.createSession(documentA, session("after-recovery"));
     assert.equal((await store.getSession(documentA, "after-recovery")).id, "after-recovery");
+  });
+});
+
+test("backs up structurally invalid v1 data and rejects invalid store identifiers", async () => {
+  await withTempDir(async (baseDir) => {
+    const mainPath = path.join(baseDir, "chat-history-v1.json");
+    await fsPromises.mkdir(baseDir, { recursive: true });
+    await fsPromises.writeFile(mainPath, JSON.stringify({
+      version: 1,
+      documents: {
+        [documentA.key]: {
+          path: documentA.path,
+          label: documentA.label,
+          lastAccessedAt: "2026-09-21T00:00:00.000Z",
+          sessions: [{
+            id: 42,
+            title: "bad",
+            mode: "text",
+            createdAt: "2026-09-21T00:00:00.000Z",
+            updatedAt: "2026-09-21T00:00:00.000Z",
+            messages: [],
+          }],
+        },
+      },
+    }), "utf8");
+
+    const store = createChatStore({ baseDir, now: clock() });
+    await store.initialize();
+    assert.match((await readdir(baseDir))[0], /^chat-history-v1\.corrupt-/);
+    assert.throws(
+      () => store.createSession({ ...documentA, key: "__proto__" }, session("bad")),
+      /saved Markdown document/i,
+    );
+    assert.throws(() => store.createSession(documentA, session("bad-id", { id: {} })), /non-empty string/i);
   });
 });
 
@@ -154,6 +188,24 @@ test("serializes concurrent mutations", async () => {
     const reloaded = createChatStore({ baseDir });
     await reloaded.initialize();
     assert.equal((await reloaded.listSessions(documentA)).length, 12);
+  });
+});
+
+test("snapshots queued mutation arguments before callers can change them", async () => {
+  await withTempDir(async (baseDir) => {
+    const store = createChatStore({ baseDir, now: clock() });
+    await store.initialize();
+    const first = store.createSession(documentA, session("first"));
+    const mutableIdentity = { ...documentA };
+    const mutableInput = session("snapshot", { title: "before" });
+    const queued = store.createSession(mutableIdentity, mutableInput);
+    mutableIdentity.key = documentB.key;
+    mutableInput.id = "changed";
+    mutableInput.title = "after";
+    await Promise.all([first, queued]);
+
+    assert.equal((await store.getSession(documentA, "snapshot")).title, "before");
+    assert.equal(await store.getSession(documentB, "changed"), null);
   });
 });
 
@@ -195,6 +247,42 @@ test("retains 100 newest inactive sessions per document", async () => {
     const ids = (await store.listSessions(documentA)).map(({ id }) => id);
     assert.equal(ids.length, 100);
     assert.equal(ids.includes("s0"), false);
+  });
+});
+
+test("rejects capacity changes that cannot retain active or self-pruned sessions", async () => {
+  await withTempDir(async (baseDir) => {
+    const store = createChatStore({ baseDir, now: clock() });
+    await store.initialize();
+    for (let index = 0; index < 100; index += 1) {
+      await store.createSession(documentA, session(`stream-${index}`, {
+        messages: [message(`active-${index}`, "assistant", "streaming")],
+      }));
+    }
+    await assert.rejects(
+      store.createSession(documentA, session("stream-100", {
+        messages: [message("active-100", "assistant", "streaming")],
+      })),
+      /capacity exceeded/i,
+    );
+    assert.equal((await store.listSessions(documentA)).length, 100);
+
+    const inactive = createChatStore({ baseDir: path.join(baseDir, "inactive"), now: clock() });
+    await inactive.initialize();
+    for (let index = 0; index < 100; index += 1) {
+      await inactive.createSession(documentA, session(`future-${index}`, {
+        createdAt: "2027-01-01T00:00:00.000Z",
+        updatedAt: "2027-01-01T00:00:00.000Z",
+      }));
+    }
+    await assert.rejects(
+      inactive.createSession(documentA, session("self-pruned", {
+        createdAt: "2025-01-01T00:00:00.000Z",
+        updatedAt: "2025-01-01T00:00:00.000Z",
+      })),
+      /capacity exceeded/i,
+    );
+    assert.equal(await inactive.getSession(documentA, "self-pruned"), null);
   });
 });
 
@@ -257,6 +345,23 @@ test("enforces an injectable global byte limit by pruning LRU inactive sessions"
     assert.equal(await store.getSession(documentA, "old"), null);
     assert.notEqual(await store.getSession(documentB, "new"), null);
     assert.ok(Buffer.byteLength(await readFile(path.join(baseDir, "chat-history-v1.json"), "utf8")) <= 1500);
+  });
+});
+
+test("rolls back an oversized active stream and keeps the write queue usable", async () => {
+  await withTempDir(async (baseDir) => {
+    const store = createChatStore({ baseDir, now: clock(), maxBytes: 1500 });
+    await store.initialize();
+    await store.createSession(documentA, session("limited"));
+    await assert.rejects(
+      store.appendMessage(documentA, "limited", message("too-large", "assistant", "streaming", "x".repeat(3000))),
+      /capacity exceeded/i,
+    );
+    await store.appendMessage(documentA, "limited", message("after-failure", "user"));
+    assert.deepEqual(
+      (await store.getSession(documentA, "limited")).messages.map(({ id }) => id),
+      ["after-failure"],
+    );
   });
 });
 
