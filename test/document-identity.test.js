@@ -11,6 +11,14 @@ assert.equal(
   "c:\\users\\alice\\notes\\file.md",
 );
 assert.equal(normalizeWindowsDocumentPath("c:\\研究\\论文.md"), "c:\\研究\\论文.md");
+assert.equal(
+  normalizeWindowsDocumentPath("C:/Work/../Work/My Paper/研究.md"),
+  "c:\\work\\my paper\\研究.md",
+);
+assert.equal(
+  normalizeWindowsDocumentPath("C:\\Work\\My Paper\\研究.md\\"),
+  "c:\\work\\my paper\\研究.md\\",
+);
 assert.equal(hashDocumentPath("c:\\docs\\one.md"), hashDocumentPath("C:\\DOCS\\ONE.MD"));
 assert.notEqual(hashDocumentPath("c:\\docs\\one.md"), hashDocumentPath("c:\\docs\\two.md"));
 assert.match(hashDocumentPath("c:\\docs\\one.md"), /^[a-f0-9]{64}$/);
@@ -46,9 +54,16 @@ assert.match(hashDocumentPath("c:\\docs\\one.md"), /^[a-f0-9]{64}$/);
 
 assert.deepEqual(getCurrentDocumentIdentity({ File: {} }), {
   persistable: false,
-  key: "",
+  key: "unsaved",
   path: "",
-  label: "Untitled",
+  label: "Unsaved document",
+});
+
+assert.deepEqual(getCurrentDocumentIdentity({ location: { href: "https://example.test/notes.md" } }), {
+  persistable: false,
+  key: "unsaved",
+  path: "",
+  label: "Unsaved document",
 });
 
 console.log("document identity tests passed");

@@ -57,7 +57,7 @@ export function getCurrentDocumentIdentity(runtime = typeof window !== "undefine
   const path = normalizeWindowsDocumentPath(candidate);
   const hash = hashDocumentPath(path);
   if (!path || !hash) {
-    return { persistable: false, key: "", path: "", label: "Untitled" };
+    return { persistable: false, key: "unsaved", path: "", label: "Unsaved document" };
   }
   const parts = path.split("\\");
   return {
