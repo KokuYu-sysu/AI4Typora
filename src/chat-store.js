@@ -307,6 +307,11 @@ export function createChatStore(options = {}) {
   }
 
   async function lstatAssetFile(target) {
+    const root = comparablePath(assetsPath);
+    const candidate = comparablePath(path.resolve(target));
+    if (!candidate.startsWith(`${root}${path.sep}`)) {
+      throw new Error("Chat asset file must remain inside the chat asset directory.");
+    }
     if (!await ensureSafeAssetsDirectory()) return null;
     try {
       const info = await fs.lstat(target);
@@ -316,6 +321,15 @@ export function createChatStore(options = {}) {
       if (error?.code === "ENOENT") return null;
       throw error;
     }
+  }
+
+  async function unlinkSafeAsset(target) {
+    if (!await lstatAssetFile(target)) return false;
+    await ensureSafeAssetsDirectory();
+    if (!await lstatAssetFile(target)) return false;
+    // ponytail: Node has no relative directory-handle unlink; double-check here, use handle-based APIs if the threat model expands.
+    await fs.unlink(target);
+    return true;
   }
 
   function timestamp() {
@@ -428,21 +442,26 @@ export function createChatStore(options = {}) {
       throw new Error("Image fetching is unavailable.");
     }
     const controller = new AbortController();
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, fetchTimeoutMs);
-    try {
+    const timeoutError = new Error(`Image download timed out after ${fetchTimeoutMs} ms.`);
+    timeoutError.code = "IMAGE_FETCH_TIMEOUT";
+    let timer;
+    const deadline = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(timeoutError);
+      }, fetchTimeoutMs);
+    });
+    const request = (async () => {
       const response = await fetchImage(source, { signal: controller.signal });
       if (!response?.ok) throw new Error(`Image download failed${response?.status ? ` (${response.status})` : ""}.`);
       const mimeType = String(response.headers?.get?.("content-type") || imageMimeTypeFromSource(source))
         .split(";", 1)[0].trim().toLowerCase();
       if (!isImageMimeType(mimeType)) throw new Error("Image source did not return an image MIME type.");
       return { bytes: await readFetchBody(response, controller), mimeType };
-    } catch (error) {
-      if (timedOut) throw new Error(`Image download timed out after ${fetchTimeoutMs} ms.`);
-      throw error;
+    })();
+    request.catch(() => {});
+    try {
+      return await Promise.race([request, deadline]);
     } finally {
       clearTimeout(timer);
     }
@@ -472,7 +491,7 @@ export function createChatStore(options = {}) {
       return;
     }
     try {
-      await fs.unlink(target);
+      await unlinkSafeAsset(target);
     } catch (error) {
       if (error?.code !== "ENOENT") {
         throw new Error(`Chat history was updated, but image asset cleanup failed: ${error?.message || error}`);
@@ -591,7 +610,7 @@ export function createChatStore(options = {}) {
       if (!target) return;
       try {
         if (!await lstatAssetFile(target)) return;
-        await fs.unlink(target);
+        await unlinkSafeAsset(target);
       } catch (error) {
         if (error?.code !== "ENOENT") throw error;
       }
@@ -718,13 +737,19 @@ export function createChatStore(options = {}) {
     const suffix = crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const temp = `${target}.${suffix}.tmp`;
     try {
+      await ensureSafeAssetsDirectory(true);
+      if (await lstatAssetFile(temp)) throw new Error("Chat asset temporary file already exists.");
       await fs.writeFile(temp, bytes, { flag: "wx" });
       await ensureSafeAssetsDirectory(true);
+      if (await lstatAssetFile(target)) {
+        await unlinkSafeAsset(temp);
+        return false;
+      }
       await fs.rename(temp, target);
       return true;
     } catch (error) {
       try {
-        await fs.unlink(temp);
+        await unlinkSafeAsset(temp);
       } catch (_) {}
       throw error;
     }
@@ -741,7 +766,7 @@ export function createChatStore(options = {}) {
         if (created && !error.historyPersisted
           && !pendingAssetLeases.get(image.assetId) && !referencedAssets(database).has(image.assetId)) {
           try {
-            await fs.unlink(target);
+            await unlinkSafeAsset(target);
           } catch (cleanupError) {
             if (cleanupError?.code !== "ENOENT") {
               throw new Error(`Image storage failed and rollback cleanup failed: ${cleanupError?.message || cleanupError}`);

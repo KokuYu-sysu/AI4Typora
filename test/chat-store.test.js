@@ -662,6 +662,41 @@ test("bounds remote image reads and turns timed-out HTTP snapshots into fallback
     assert.equal(aborted, true);
     await assert.rejects(timeoutStore.saveImageAsset("blob:timeout"), /timed out/i);
 
+    const ignoredFetch = createChatStore({
+      baseDir: path.join(baseDir, "ignored-fetch"),
+      now: clock(),
+      fetch: async () => new Promise(() => {}),
+      fetchTimeoutMs: 5,
+    });
+    await ignoredFetch.initialize();
+    assert.equal((await ignoredFetch.saveImageAsset("https://example.test/ignored-fetch.png")).fallbackUrl, "https://example.test/ignored-fetch.png");
+
+    const ignoredBody = createChatStore({
+      baseDir: path.join(baseDir, "ignored-body"),
+      now: clock(),
+      fetch: async () => ({
+        ok: true,
+        headers: { get: () => "image/png" },
+        arrayBuffer: async () => new Promise(() => {}),
+      }),
+      fetchTimeoutMs: 5,
+    });
+    await ignoredBody.initialize();
+    assert.equal((await ignoredBody.saveImageAsset("https://example.test/ignored-body.png")).fallbackUrl, "https://example.test/ignored-body.png");
+
+    const ignoredReader = createChatStore({
+      baseDir: path.join(baseDir, "ignored-reader"),
+      now: clock(),
+      fetch: async () => ({
+        ok: true,
+        headers: { get: () => "image/png" },
+        body: { getReader: () => ({ read: async () => new Promise(() => {}), cancel: async () => {}, releaseLock: () => {} }) },
+      }),
+      fetchTimeoutMs: 5,
+    });
+    await ignoredReader.initialize();
+    assert.equal((await ignoredReader.saveImageAsset("https://example.test/ignored-reader.png")).fallbackUrl, "https://example.test/ignored-reader.png");
+
     const tooLarge = createChatStore({
       baseDir: path.join(baseDir, "too-large"),
       now: clock(),
@@ -708,6 +743,37 @@ test("refuses symbolic-link asset roots and files", async () => {
       createChatStore({ baseDir: path.join(baseDir, "file"), fs: linkedFileFs, now: clock() }).initialize(),
       /asset file.*symbolic link/i,
     );
+  });
+});
+
+test("rechecks the asset directory immediately before destructive cleanup", async () => {
+  await withTempDir(async (baseDir) => {
+    const bytes = Buffer.from([27]);
+    const writer = createChatStore({ baseDir, now: clock(), fetch: imageFetch(bytes) });
+    await writer.initialize();
+    const image = await writer.saveImageAsset("https://example.test/flip.png");
+    const assetPath = path.join(baseDir, image.storedPath);
+    await writer.createSession(documentA, session("flip"));
+    await writer.appendMessage(documentA, "flip", { ...message("flip-image", "user"), image });
+
+    let flip = false;
+    let rootChecks = 0;
+    const guardedFs = {
+      ...fsPromises,
+      async lstat(filePath) {
+        if (path.resolve(filePath) === path.resolve(baseDir, "chat-assets")) {
+          rootChecks += 1;
+          if (flip && rootChecks >= 2) return { isSymbolicLink: () => true };
+        }
+        return fsPromises.lstat(filePath);
+      },
+    };
+    const guarded = createChatStore({ baseDir, fs: guardedFs, now: clock() });
+    await guarded.initialize();
+    flip = true;
+    rootChecks = 0;
+    await assert.rejects(guarded.deleteSession(documentA, "flip"), /symbolic link/i);
+    assert.equal((await fsPromises.stat(assetPath)).isFile(), true);
   });
 });
 
