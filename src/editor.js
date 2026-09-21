@@ -5,6 +5,7 @@
     this.insertTarget = null;
     this.insertCid = "";
     this.insertionRange = null;
+    this.selectionSnapshot = null;
   }
 
   isEditorTarget(node) {
@@ -265,6 +266,60 @@
 
   getSavedText() {
     return this.savedText || "";
+  }
+
+  captureSelectionSnapshot(documentId) {
+    const id = String(documentId || "");
+    const selection = window.getSelection();
+    if (!id || !selection || selection.rangeCount === 0 || selection.isCollapsed) {
+      return null;
+    }
+    try {
+      const range = selection.getRangeAt(0).cloneRange();
+      const text = String(range.toString());
+      if (!text) return null;
+      this.selectionSnapshot = { documentId: id, text, range };
+      return this.selectionSnapshot;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  validateSelectionSnapshot(snapshot, currentDocumentId) {
+    if (!snapshot || snapshot.documentId !== String(currentDocumentId || "")) {
+      return { ok: false, reason: "document-changed" };
+    }
+    const writeEl = document.getElementById("write");
+    if (!writeEl || !this.isRangeUsable(snapshot.range, writeEl)) {
+      return { ok: false, reason: "range-detached" };
+    }
+    try {
+      if (String(snapshot.range.toString()) !== snapshot.text) {
+        return { ok: false, reason: "selection-changed" };
+      }
+    } catch (_) {
+      return { ok: false, reason: "range-detached" };
+    }
+    return { ok: true };
+  }
+
+  replaceSelectionSnapshot(snapshot, nextText, currentDocumentId) {
+    const validation = this.validateSelectionSnapshot(snapshot, currentDocumentId);
+    if (!validation.ok) return validation;
+    try {
+      const selection = window.getSelection();
+      if (!selection) return { ok: false, reason: "range-detached" };
+      selection.removeAllRanges();
+      selection.addRange(snapshot.range);
+      if (!document.execCommand("insertText", false, nextText)) {
+        return { ok: false, reason: "replace-failed" };
+      }
+      this.notifyEditorInput(document.getElementById("write"));
+      if (this.selectionSnapshot === snapshot) this.selectionSnapshot = null;
+      return { ok: true };
+    } catch (_) {
+      return { ok: false, reason: "replace-failed" };
+    }
   }
 
   getDocumentText() {
