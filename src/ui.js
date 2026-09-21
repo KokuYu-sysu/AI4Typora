@@ -66,7 +66,7 @@ export function ensureStyles() {
     .ai-edit-chat-session { display: flex; align-items: center; gap: 2px; padding: 3px 5px; }
     .ai-edit-chat-session.active { background: #eff6ff; }
     .ai-edit-chat-session-title { min-width: 0; flex: 1; overflow: hidden; border: none; background: transparent; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
-    .ai-edit-chat-session-actions { display: none; }.ai-edit-chat-session:hover .ai-edit-chat-session-actions { display: inline-flex; }
+    .ai-edit-chat-session-actions { display: none; }.ai-edit-chat-session:hover .ai-edit-chat-session-actions, .ai-edit-chat-session:focus-within .ai-edit-chat-session-actions { display: inline-flex; }
     .ai-edit-chat-session-actions .ai-edit-btn { padding: 3px 5px; font-size: 11px; }
     .ai-edit-chat-main { min-width: 0; flex: 1; display: flex; flex-direction: column; }.ai-edit-chat-header { border-bottom: 1px solid #e5e7eb; font-weight: 600; }.ai-edit-chat-header .ai-edit-dialog-close { margin-left: auto; }
     .ai-edit-chat-error { color: #b91c1c; min-height: 0; padding: 0 8px; }.ai-edit-chat-messages { flex: 1; overflow: auto; padding: 8px; }

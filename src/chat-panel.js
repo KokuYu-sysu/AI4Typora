@@ -22,7 +22,9 @@ export function createChatPanel({ service, getDocumentIdentity, onInsertAssistan
   let pollTimer = null;
   let disposeResize = null;
   let endResize = null;
-  let identityKey = "";
+  let refreshPromise = null;
+  let refreshTargetKey = "";
+  let refreshGeneration = 0;
   let railCollapsed = false;
 
   const currentIdentity = () => getDocumentIdentity();
@@ -33,13 +35,45 @@ export function createChatPanel({ service, getDocumentIdentity, onInsertAssistan
   };
   const safely = (work) => Promise.resolve().then(work).catch(showError);
 
+  function matchesDocument(identity) {
+    return isOpen() && identity?.key === currentIdentity()?.key
+      && identity?.key === service.getState().documentIdentity?.key;
+  }
+
+  function beginDraft(identity, options) {
+    const targetKey = identity?.key || "";
+    if (refreshPromise && refreshTargetKey === targetKey) return refreshPromise;
+    const generation = ++refreshGeneration;
+    refreshTargetKey = targetKey;
+    if (service.getState().documentIdentity?.key) service.stop();
+    refreshPromise = Promise.resolve().then(() => service.openDraft(identity, options)).then(() => (
+      generation === refreshGeneration && matchesDocument(identity) ? identity : null
+    )).finally(() => {
+      if (generation === refreshGeneration) {
+        refreshPromise = null;
+        refreshTargetKey = "";
+      }
+    });
+    return refreshPromise;
+  }
+
   async function ensureDocument() {
-    const identity = currentIdentity();
-    if (identity?.key === identityKey) return identity;
-    service.stop();
-    identityKey = identity?.key || "";
-    await service.openDraft(identity);
+    while (isOpen()) {
+      const identity = currentIdentity();
+      if (refreshPromise) {
+        await refreshPromise;
+        continue;
+      }
+      if (matchesDocument(identity)) return identity;
+      await beginDraft(identity);
+    }
     return null;
+  }
+
+  async function forCurrentDocument(work) {
+    const identity = await ensureDocument();
+    if (!identity || !matchesDocument(identity)) return null;
+    return work(identity);
   }
 
   function addButton(parent, action, label, extra = {}) {
@@ -104,32 +138,38 @@ export function createChatPanel({ service, getDocumentIdentity, onInsertAssistan
     if (name === "close") return close();
     if (name === "rail") { railCollapsed = !railCollapsed; render(); return; }
     if (name === "stop") return service.stop();
-    if (!await ensureDocument()) return;
-    const identity = currentIdentity();
     if (name === "send") {
       const input = root.querySelector(".ai-edit-chat-input");
-      const text = input.value.trim();
-      if (!text) return;
-      input.value = "";
-      return service.send(text);
+      return forCurrentDocument(async () => {
+        const text = input.value.trim();
+        if (!text) return;
+        input.value = "";
+        await service.send(text);
+      });
     }
-    if (name === "new") return service.openDraft(identity);
-    if (name === "select") return service.openSession(identity, action.dataset.sessionId);
+    if (name === "new") return forCurrentDocument((identity) => beginDraft(identity));
+    if (name === "select") return forCurrentDocument((identity) => service.openSession(identity, action.dataset.sessionId));
     if (name === "rename") {
-      if (action.dataset.sessionId !== service.getState().activeSession?.id) await service.openSession(identity, action.dataset.sessionId);
-      const active = service.getState().activeSession;
-      const title = globalThis.window?.prompt?.("Rename conversation", active?.title || "") ?? "";
-      if (title.trim()) return service.renameActive(title);
-      return;
+      return forCurrentDocument(async (identity) => {
+        if (action.dataset.sessionId !== service.getState().activeSession?.id) await service.openSession(identity, action.dataset.sessionId);
+        if (!matchesDocument(identity)) return;
+        const active = service.getState().activeSession;
+        const title = globalThis.window?.prompt?.("Rename conversation", active?.title || "") ?? "";
+        if (title.trim()) await service.renameActive(title);
+      });
     }
     if (name === "delete") {
-      if (action.dataset.sessionId !== service.getState().activeSession?.id) await service.openSession(identity, action.dataset.sessionId);
-      return service.deleteActive();
+      return forCurrentDocument(async (identity) => {
+        if (action.dataset.sessionId !== service.getState().activeSession?.id) await service.openSession(identity, action.dataset.sessionId);
+        if (matchesDocument(identity)) await service.deleteActive();
+      });
     }
-    const message = messageById(action.dataset.messageId);
-    if (!message?.content) return;
-    if (name === "copy") return onCopy ? onCopy(message.content) : globalThis.navigator?.clipboard?.writeText(message.content);
-    if (name === "insert") return onInsertAssistant?.(message.content);
+    return forCurrentDocument(async () => {
+      const message = messageById(action.dataset.messageId);
+      if (!message?.content) return;
+      if (name === "copy") return onCopy ? onCopy(message.content) : globalThis.navigator?.clipboard?.writeText(message.content);
+      if (name === "insert") return onInsertAssistant?.(message.content);
+    });
   }
 
   function onClick(event) {
@@ -140,11 +180,7 @@ export function createChatPanel({ service, getDocumentIdentity, onInsertAssistan
   function onKeyDown(event) {
     if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey)) return;
     event.preventDefault();
-    const input = root.querySelector(".ai-edit-chat-input");
-    if (!input.value.trim()) return;
-    const text = input.value;
-    input.value = "";
-    void safely(async () => { if (await ensureDocument()) await service.send(text); });
+    void safely(() => handleAction({ dataset: { action: "send" } }));
   }
 
   function startResize(handle) {
@@ -180,23 +216,29 @@ export function createChatPanel({ service, getDocumentIdentity, onInsertAssistan
     addButton(railHeader, "new", "New"); addButton(railHeader, "rail", "Hide");
     rail.appendChild(railHeader); rail.appendChild(element("div", "ai-edit-chat-sessions"));
     const main = element("section", "ai-edit-chat-main");
-    const header = element("header", "ai-edit-chat-header", "AI conversation"); addButton(header, "rail", "History"); addButton(header, "close", "×").className = "ai-edit-dialog-close";
+    const header = element("header", "ai-edit-chat-header", "AI conversation"); addButton(header, "rail", "History");
+    const closeButton = addButton(header, "close", "×"); closeButton.className = "ai-edit-dialog-close"; closeButton.setAttribute("aria-label", "Close conversation");
     main.appendChild(header); main.appendChild(element("div", "ai-edit-chat-error")); main.appendChild(element("div", "ai-edit-chat-messages"));
     const composer = element("div", "ai-edit-chat-composer");
-    const input = element("textarea", "ai-edit-chat-input"); input.placeholder = "Ask a follow-up… (Ctrl+Enter to send)";
+    const input = element("textarea", "ai-edit-chat-input"); input.placeholder = "Ask a follow-up… (Ctrl+Enter to send)"; input.setAttribute("aria-label", "Conversation message");
     composer.appendChild(input); addButton(composer, "stop", "Stop").className = "ai-edit-btn danger"; addButton(composer, "send", "Send").className = "ai-edit-btn primary";
     main.appendChild(composer); root.appendChild(resize); root.appendChild(rail); root.appendChild(main); document.body.appendChild(root);
     root.addEventListener("click", onClick); input.addEventListener("keydown", onKeyDown);
     disposeResize = startResize(resize);
     unsubscribe = service.subscribe(render);
-    identityKey = currentIdentity()?.key || "";
-    await service.openDraft(currentIdentity(), options);
+    const opening = beginDraft(currentIdentity(), options);
+    const openingGeneration = refreshGeneration;
+    await opening;
+    if (!isOpen() || openingGeneration !== refreshGeneration) return;
     render();
     pollTimer = window.setInterval(() => { void safely(refreshDocument); }, 500);
   }
 
   function close() {
     if (!root) return;
+    refreshGeneration += 1;
+    refreshPromise = null;
+    refreshTargetKey = "";
     window.clearInterval(pollTimer); pollTimer = null;
     unsubscribe?.(); unsubscribe = null;
     disposeResize?.(); disposeResize = null;
