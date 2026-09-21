@@ -117,3 +117,29 @@ test("stop during settings resolution persists a stopped assistant and creates n
   assert.equal(service.getState().activeSession.messages.at(-1).status, "stopped");
   assert.ok(store.calls.includes("append:assistant:stopped"));
 });
+
+test("slow draft cleanup cannot overwrite a later A-B-A navigation", async () => {
+  const store = fakeStore(); const factory = requests(); const release = deferred();
+  store.releaseImageAsset = async () => release.promise;
+  const service = createChatService({ store, createRequest: factory.createRequest });
+  const asset = { assetId: "a".repeat(64), originalSource: "", mimeType: "image/png", storedPath: "chat-assets/a.png", fallbackUrl: "" };
+  await service.openDraft(identity, { pendingImage: asset });
+  const slowA = service.openDraft({ ...identity, key: "doc_11111111111111111111111111111111" });
+  await tick();
+  const fastB = service.openDraft({ ...identity, key: "doc_22222222222222222222222222222222" });
+  const finalA = service.openDraft({ ...identity, key: "doc_33333333333333333333333333333333" });
+  await Promise.all([fastB, finalA]);
+  release.resolve(); await slowA;
+  assert.equal(service.getState().documentIdentity.key, "doc_33333333333333333333333333333333");
+});
+
+test("a slow session lookup cannot overwrite a newer draft", async () => {
+  const store = fakeStore(); const factory = requests(); const lookup = deferred();
+  store.getSession = async () => lookup.promise;
+  const service = createChatService({ store, createRequest: factory.createRequest });
+  const opening = service.openSession(identity, "old-session"); await tick();
+  await service.openDraft({ ...identity, key: "doc_44444444444444444444444444444444" });
+  lookup.resolve({ id: "old-session", title: "Old", mode: "text", messages: [] }); await opening;
+  assert.equal(service.getState().documentIdentity.key, "doc_44444444444444444444444444444444");
+  assert.equal(service.getState().activeSession, null);
+});

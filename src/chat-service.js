@@ -111,6 +111,7 @@ export function createChatService({ store, createRequest, resolveSettings = () =
   let state = initialState();
   let activeRequest = null;
   let generation = 0;
+  let navigation = 0;
   let lastFailed = null;
   const listeners = new Set();
 
@@ -123,13 +124,12 @@ export function createChatService({ store, createRequest, resolveSettings = () =
     generation === requestGeneration && state.documentIdentity?.key === identity?.key
     && state.activeSession?.id === id
   );
-  const refreshSessions = async (identity = state.documentIdentity) => {
+  const refreshSessions = async (identity = state.documentIdentity, navigationGeneration = navigation) => {
     const sessions = identity?.persistable ? await store.listSessions(identity) : [];
-    if (state.documentIdentity?.key === identity?.key) set({ sessions });
+    if (navigation === navigationGeneration && state.documentIdentity?.key === identity?.key) set({ sessions });
     return sessions;
   };
-  const releasePending = async () => {
-    const image = state.pendingImage;
+  const releasePending = async (image = state.pendingImage) => {
     if (hasStoredAsset(image)) await store.releaseImageAsset(image);
   };
   const abort = () => {
@@ -141,8 +141,12 @@ export function createChatService({ store, createRequest, resolveSettings = () =
   };
 
   async function openDraft(identity, options = {}) {
+    const navigationGeneration = ++navigation;
     abort();
-    await releasePending();
+    const pendingImage = state.pendingImage;
+    if (pendingImage) set({ pendingImage: null });
+    await releasePending(pendingImage);
+    if (navigation !== navigationGeneration) return;
     const documentIdentity = clone(identity);
     state = {
       ...initialState(),
@@ -150,12 +154,17 @@ export function createChatService({ store, createRequest, resolveSettings = () =
       pendingImage: clone(options.pendingImage ?? options.imageSource ?? null),
     };
     emit();
-    await refreshSessions(documentIdentity);
+    const sessions = documentIdentity?.persistable ? await store.listSessions(documentIdentity) : [];
+    if (navigation === navigationGeneration) set({ sessions });
   }
 
   async function openSession(identity, id) {
+    const navigationGeneration = ++navigation;
     abort();
-    await releasePending();
+    const pendingImage = state.pendingImage;
+    if (pendingImage) set({ pendingImage: null });
+    await releasePending(pendingImage);
+    if (navigation !== navigationGeneration) return;
     const documentIdentity = clone(identity);
     state = { ...initialState(), documentIdentity };
     emit();
@@ -163,7 +172,7 @@ export function createChatService({ store, createRequest, resolveSettings = () =
       documentIdentity?.persistable ? store.listSessions(documentIdentity) : [],
       documentIdentity?.persistable ? store.getSession(documentIdentity, id) : null,
     ]);
-    if (state.documentIdentity?.key === documentIdentity?.key) {
+    if (navigation === navigationGeneration && state.documentIdentity?.key === documentIdentity?.key) {
       set({ sessions, activeSession, draftMode: !activeSession });
     }
   }
@@ -187,7 +196,9 @@ export function createChatService({ store, createRequest, resolveSettings = () =
       return;
     }
     const requestGeneration = ++generation;
+    const navigationGeneration = navigation;
     const current = (id = "") => generation === requestGeneration
+      && navigation === navigationGeneration
       && state.documentIdentity?.key === identity.key
       && (!id || state.activeSession?.id === id);
     let session = state.activeSession;
@@ -345,7 +356,14 @@ export function createChatService({ store, createRequest, resolveSettings = () =
     stop,
     renameActive,
     deleteActive,
-    dispose() { abort(); void releasePending(); listeners.clear(); state = initialState(); },
+    dispose() {
+      const pendingImage = state.pendingImage;
+      navigation += 1;
+      abort();
+      void releasePending(pendingImage);
+      listeners.clear();
+      state = initialState();
+    },
     getState: () => clone(state),
   };
 }
