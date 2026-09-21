@@ -49,10 +49,16 @@ function pruneMessages(session) {
     }
 
     // A long, unanswered input sequence is not a complete turn, but it must
-    // still observe the retention limit. Never remove an active stream.
+    // still observe the retention limit.
     const oldestFinishedMessage = session.messages.findIndex((message) => message.status !== "streaming");
-    if (oldestFinishedMessage < 0) break;
-    session.messages.splice(oldestFinishedMessage, 1);
+    if (oldestFinishedMessage >= 0) {
+      session.messages.splice(oldestFinishedMessage, 1);
+      continue;
+    }
+
+    // The only remaining messages are stale streaming placeholders. Keep the
+    // newest active one and discard the oldest placeholder to enforce the cap.
+    session.messages.shift();
   }
 }
 

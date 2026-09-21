@@ -230,7 +230,7 @@ test("prunes the oldest finished message when no complete turn exists", async ()
   });
 });
 
-test("does not prune a session containing only active streaming messages", async () => {
+test("keeps the newest active stream while pruning stale streaming placeholders", async () => {
   await withTempDir(async (baseDir) => {
     const store = createChatStore({ baseDir, now: clock() });
     await store.initialize();
@@ -238,7 +238,10 @@ test("does not prune a session containing only active streaming messages", async
       messages: Array.from({ length: 201 }, (_, index) => message(`s${index}`, "assistant", "streaming")),
     }));
 
-    assert.equal((await store.getSession(documentA, "active-only")).messages.length, 201);
+    const saved = await store.getSession(documentA, "active-only");
+    assert.equal(saved.messages.length, 200);
+    assert.equal(saved.messages[0].id, "s1");
+    assert.equal(saved.messages.at(-1).id, "s200");
   });
 });
 
