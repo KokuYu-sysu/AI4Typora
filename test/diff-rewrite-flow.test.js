@@ -49,6 +49,7 @@ const input = Object.freeze({
   documentText: "Full document",
   extraPrompt: "Be concise",
   promptKey: "optimize_with_context",
+  systemPrompt: "editor system",
   userPrompt: "Be concise\n\nRewrite ⟪AI_EDIT_MATH_0⟫ using Full document",
   mathEntries: Object.freeze([
     Object.freeze({ token: "⟪AI_EDIT_MATH_0⟫", source: "$A$", start: 7, end: 10 }),
@@ -84,6 +85,8 @@ test("regeneration aborts the old request and ignores its late output", async ()
 
   const first = attempt();
   calls[0].onChunk("first partial");
+  settings.prompts.optimize_with_context.system = "mutated system";
+  settings.prompts.optimize_with_context.user = "mutated user prompt";
   const second = attempt();
   assert.equal(requests[0].handle.aborted, true);
   calls[0].onChunk(" late first");
@@ -100,7 +103,9 @@ test("regeneration aborts the old request and ignores its late output", async ()
     replaceAllowed: true,
   });
   assert.equal(calls[0].messages[0].content, calls[1].messages[0].content);
+  assert.match(calls[1].messages[0].content, /Rewrite .* using Full document/);
   assert.equal(calls[0].systemPrompt, calls[1].systemPrompt);
+  assert.equal(calls[1].systemPrompt, "editor system");
   assert.equal(dialog.events.some((event) => event[1] === "first partial late first"), false);
   assert.deepEqual(dialog.events.at(-1), ["complete", {
     candidateText: "Second $A$",

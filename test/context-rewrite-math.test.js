@@ -103,6 +103,7 @@ function installFakeDom() {
   const keyListeners = new Set();
   let keydownRemoveCount = 0;
   let copiedText = null;
+  let execCommandCalls = 0;
   const dragListeners = {
     mousemove: new Set(),
     mouseup: new Set(),
@@ -117,6 +118,7 @@ function installFakeDom() {
     createElement(tagName) { return new FakeElement(tagName, document); },
     querySelector(selector) { return document.body.querySelector(selector) || document.head.querySelector(selector); },
     getElementById(id) { return document.querySelector(`#${id}`); },
+    execCommand() { execCommandCalls += 1; return true; },
     addEventListener(type, listener) {
       if (type === "keydown") keyListeners.add(listener);
       if (dragListeners[type]) dragListeners[type].add(listener);
@@ -145,6 +147,7 @@ function installFakeDom() {
     value: { clipboard: { writeText: async (text) => { copiedText = text; } } },
   });
   document.getCopiedText = () => copiedText;
+  document.getExecCommandCalls = () => execCommandCalls;
   globalThis.window = {
     ...globalThis.window,
     File: { filePath: "C:\\docs\\rewrite.md" },
@@ -375,6 +378,61 @@ test("replace revalidates the snapshot and keeps a stale candidate open", async 
     assert.equal(findAction(document.body, "replace"), null);
     assert.match(document.querySelector(".ai-edit-diff-validation").textContent, /selection changed/i);
   } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("an unsaved document can generate but never exposes Replace", async () => {
+  const document = installFakeDom();
+  const originalFetch = globalThis.fetch;
+  const plugin = createOptimizePlugin("Original");
+  window.File = {};
+  globalThis.fetch = async () => sseResponse(
+    `data: ${JSON.stringify({ choices: [{ delta: { content: "Candidate" } }] })}\n\n`,
+  );
+
+  try {
+    const flow = plugin.openOptimizeFlow(false);
+    completePrompt(document);
+    await flow;
+
+    assert.equal(findAction(document.body, "replace"), null);
+    assert.match(document.querySelector(".ai-edit-diff-validation").textContent, /save the document/i);
+    assert.equal(document.getExecCommandCalls(), 0);
+  } finally {
+    closeAnyDialog("test cleanup");
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("separate unsaved rewrite flows never share a replacement identity", async () => {
+  const document = installFakeDom();
+  const originalFetch = globalThis.fetch;
+  const capturedIds = [];
+  window.File = {};
+  globalThis.fetch = async () => sseResponse(
+    `data: ${JSON.stringify({ choices: [{ delta: { content: "Candidate" } }] })}\n\n`,
+  );
+
+  try {
+    for (const selectedText of ["First", "Second"]) {
+      const plugin = createOptimizePlugin(selectedText);
+      plugin.editorSelection.captureSelectionSnapshot = (documentId) => {
+        capturedIds.push(documentId);
+        return { documentId, text: selectedText, range: {} };
+      };
+      const flow = plugin.openOptimizeFlow(false);
+      completePrompt(document);
+      await flow;
+      assert.equal(findAction(document.body, "replace"), null);
+      closeAnyDialog("next unsaved document");
+    }
+
+    assert.equal(capturedIds.length, 2);
+    assert.notEqual(capturedIds[0], capturedIds[1]);
+    assert.equal(document.getExecCommandCalls(), 0);
+  } finally {
+    closeAnyDialog("test cleanup");
     globalThis.fetch = originalFetch;
   }
 });

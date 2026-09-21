@@ -10,6 +10,8 @@ import { AiEditSettingTab } from "./settings-tab.js";
 import { ensureStyles, removeStyles, showToast, openContextMenu, closeContextMenu, promptForText, createStreamDialog, closeAnyDialog } from "./ui.js";
 import { protectMath, restoreMathPreview, restoreMath } from "./math-protection.js";
 
+let unsavedRewriteSequence = 0;
+
 export function prepareContextRewrite(selectedText, promptTemplate, documentText) {
   const protectedSelection = protectMath(selectedText);
   return {
@@ -29,6 +31,9 @@ function snapshotValidationMessage(reason) {
   }
   if (reason === "range-detached") {
     return "The original selection is no longer available. Replace is disabled.";
+  }
+  if (reason === "document-unsaved") {
+    return "Please save the document before replacing the selection.";
   }
   return "The original selection could not be verified. Replace is disabled.";
 }
@@ -50,7 +55,7 @@ export async function runRewriteAttempt({
 
   try {
     request = createRequest({
-      systemPrompt: settings.prompts[input.promptKey].system,
+      systemPrompt: input.systemPrompt,
       messages: [{ role: "user", content: input.userPrompt }],
       settings,
       onChunk: (chunk) => {
@@ -432,7 +437,9 @@ export default class AiEditPlugin extends Plugin {
     }
 
     const identity = getCurrentDocumentIdentity();
-    const documentId = identity.key || "unsaved-document";
+    const documentId = identity.persistable
+      ? identity.key
+      : `unsaved-rewrite-${++unsavedRewriteSequence}`;
     const snapshot = this.editorSelection.captureSelectionSnapshot(documentId);
     if (!snapshot || snapshot.text !== selectedText) {
       showToast("The selected text could not be captured safely. Please select it again.", "error");
@@ -470,7 +477,9 @@ export default class AiEditPlugin extends Plugin {
       documentText,
       extraPrompt,
       promptKey,
+      systemPrompt: String(promptConfig.system),
       userPrompt,
+      documentPersistable: identity.persistable,
       mathEntries: Object.freeze(contextRewrite.mathEntries.map((entry) => Object.freeze({ ...entry }))),
     });
     let activeRequest = null;
@@ -478,7 +487,13 @@ export default class AiEditPlugin extends Plugin {
     let closed = false;
 
     let dialog;
-    const currentDocumentId = () => getCurrentDocumentIdentity().key || "unsaved-document";
+    const validateTarget = () => {
+      const currentIdentity = getCurrentDocumentIdentity();
+      if (!input.documentPersistable || !currentIdentity.persistable) {
+        return { ok: false, reason: "document-unsaved" };
+      }
+      return this.editorSelection.validateSelectionSnapshot(input.snapshot, currentIdentity.key);
+    };
     const attempt = () => {
       const attemptGeneration = ++generation;
       const previousRequest = activeRequest;
@@ -495,10 +510,7 @@ export default class AiEditPlugin extends Plugin {
           activeRequest = request;
         },
         isCurrent: () => !closed && generation === attemptGeneration,
-        validateReplacement: () => this.editorSelection.validateSelectionSnapshot(
-          input.snapshot,
-          currentDocumentId(),
-        ),
+        validateReplacement: validateTarget,
       }).finally(() => {
         if (generation === attemptGeneration) activeRequest = null;
       });
@@ -519,11 +531,14 @@ export default class AiEditPlugin extends Plugin {
         void attempt();
       },
       onReplace: (candidateText) => {
-        const result = this.editorSelection.replaceSelectionSnapshot(
-          input.snapshot,
-          candidateText,
-          currentDocumentId(),
-        );
+        const validation = validateTarget();
+        const result = validation.ok
+          ? this.editorSelection.replaceSelectionSnapshot(
+            input.snapshot,
+            candidateText,
+            getCurrentDocumentIdentity().key,
+          )
+          : validation;
         if (!result.ok) {
           dialog.complete({
             candidateText,
