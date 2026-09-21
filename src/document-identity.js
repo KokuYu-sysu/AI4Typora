@@ -23,9 +23,13 @@ export function normalizeWindowsDocumentPath(value) {
 
   const pathModule = getNodeModule("path");
   const windowsPath = raw.replace(/\//g, "\\");
-  const normalized = pathModule?.win32?.normalize
+  let normalized = pathModule?.win32?.normalize
     ? pathModule.win32.normalize(windowsPath)
     : windowsPath;
+  const root = pathModule?.win32?.parse?.(normalized)?.root || "";
+  while (normalized.length > root.length && normalized.endsWith("\\")) {
+    normalized = normalized.slice(0, -1);
+  }
   return normalized.toLowerCase();
 }
 

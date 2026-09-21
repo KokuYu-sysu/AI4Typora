@@ -17,7 +17,11 @@ assert.equal(
 );
 assert.equal(
   normalizeWindowsDocumentPath("C:\\Work\\My Paper\\研究.md\\"),
-  "c:\\work\\my paper\\研究.md\\",
+  normalizeWindowsDocumentPath("C:\\Work\\My Paper\\研究.md"),
+);
+assert.equal(
+  hashDocumentPath("C:\\Work\\My Paper\\研究.md\\"),
+  hashDocumentPath("C:\\Work\\My Paper\\研究.md"),
 );
 assert.equal(hashDocumentPath("c:\\docs\\one.md"), hashDocumentPath("C:\\DOCS\\ONE.MD"));
 assert.notEqual(hashDocumentPath("c:\\docs\\one.md"), hashDocumentPath("c:\\docs\\two.md"));
