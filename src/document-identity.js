@@ -26,7 +26,9 @@ export function normalizeWindowsDocumentPath(value) {
   let normalized = pathModule?.win32?.normalize
     ? pathModule.win32.normalize(windowsPath)
     : windowsPath;
-  const root = pathModule?.win32?.parse?.(normalized)?.root || "";
+  let root = pathModule?.win32?.parse?.(normalized)?.root || "";
+  if (!root && /^[a-z]:\\$/i.test(normalized)) root = normalized;
+  if (!root && /^\\\\[^\\]+\\[^\\]+\\$/.test(normalized)) root = normalized;
   while (normalized.length > root.length && normalized.endsWith("\\")) {
     normalized = normalized.slice(0, -1);
   }

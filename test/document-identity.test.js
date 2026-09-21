@@ -29,6 +29,17 @@ assert.match(hashDocumentPath("c:\\docs\\one.md"), /^[a-f0-9]{32}$/);
 assert.equal(hashDocumentPath("c:\\docs\\one.md").length, 32);
 
 {
+  const getBuiltinModule = process.getBuiltinModule;
+  process.getBuiltinModule = undefined;
+  try {
+    assert.equal(normalizeWindowsDocumentPath("C:\\"), "c:\\");
+    assert.equal(normalizeWindowsDocumentPath("\\\\server\\share\\"), "\\\\server\\share\\");
+  } finally {
+    process.getBuiltinModule = getBuiltinModule;
+  }
+}
+
+{
   const identity = getCurrentDocumentIdentity({
     File: { filePath: "C:/Docs/Article.md" },
   });
