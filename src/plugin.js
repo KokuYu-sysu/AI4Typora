@@ -2,6 +2,8 @@
 
 import { abortCurrentRequest, createAiRequest } from "./api.js";
 import { DEFAULT_SETTINGS, mergeSettings, shortcutMatches } from "./config.js";
+import { createDiffDialog } from "./diff-dialog.js";
+import { getCurrentDocumentIdentity } from "./document-identity.js";
 import { EditorSelectionController } from "./editor.js";
 import { prepareImageInputForModel } from "./platform.js";
 import { AiEditSettingTab } from "./settings-tab.js";
@@ -16,6 +18,94 @@ export function prepareContextRewrite(selectedText, promptTemplate, documentText
       .replace(/\{document\}/g, String(documentText)),
     mathEntries: protectedSelection.entries,
   };
+}
+
+function snapshotValidationMessage(reason) {
+  if (reason === "document-changed") {
+    return "The active document changed. Replace is disabled.";
+  }
+  if (reason === "selection-changed") {
+    return "The original selection changed. Replace is disabled.";
+  }
+  if (reason === "range-detached") {
+    return "The original selection is no longer available. Replace is disabled.";
+  }
+  return "The original selection could not be verified. Replace is disabled.";
+}
+
+export async function runRewriteAttempt({
+  input,
+  settings,
+  dialog,
+  createRequest = createAiRequest,
+  previousRequest = null,
+  onRequest,
+  isCurrent = () => true,
+  validateReplacement = () => ({ ok: true }),
+}) {
+  previousRequest?.abort();
+  dialog.beginGeneration();
+  let rawOutput = "";
+  let request;
+
+  try {
+    request = createRequest({
+      systemPrompt: settings.prompts[input.promptKey].system,
+      messages: [{ role: "user", content: input.userPrompt }],
+      settings,
+      onChunk: (chunk) => {
+        if (!isCurrent()) return;
+        rawOutput += chunk;
+        dialog.setStreamingText(restoreMathPreview(rawOutput, input.mathEntries));
+      },
+      onAttemptStart: ({ resetOutput }) => {
+        if (!isCurrent() || !resetOutput) return;
+        rawOutput = "";
+        dialog.setStreamingText("");
+      },
+    });
+    onRequest?.(request);
+    const result = await request.promise;
+    if (!isCurrent()) {
+      return {
+        status: "stopped",
+        candidateText: restoreMathPreview(rawOutput, input.mathEntries),
+        replaceAllowed: false,
+      };
+    }
+    if (!String(result).trim()) {
+      dialog.fail("The model returned an empty response.");
+      return { status: "failed", candidateText: "", replaceAllowed: false };
+    }
+
+    const restored = input.mathEntries.length
+      ? restoreMath(result, input.mathEntries)
+      : { ok: true, text: result };
+    const candidateText = restored.ok
+      ? restored.text
+      : restoreMathPreview(result, input.mathEntries);
+    const validation = restored.ok ? validateReplacement() : { ok: false };
+    const replaceAllowed = restored.ok && validation.ok;
+    const validationMessage = restored.ok
+      ? (validation.ok ? "" : snapshotValidationMessage(validation.reason))
+      : restored.error;
+    dialog.complete({ candidateText, replaceAllowed, validationMessage });
+    return { status: "complete", candidateText, replaceAllowed };
+  } catch (error) {
+    if (!isCurrent() || error?.name === "AbortError") {
+      return {
+        status: "stopped",
+        candidateText: restoreMathPreview(rawOutput, input.mathEntries),
+        replaceAllowed: false,
+      };
+    }
+    dialog.fail(error?.message || "The request failed.");
+    return {
+      status: "failed",
+      candidateText: restoreMathPreview(rawOutput, input.mathEntries),
+      replaceAllowed: false,
+    };
+  }
 }
 
 function matchesFixedShortcut(event, shortcut) {
@@ -341,6 +431,14 @@ export default class AiEditPlugin extends Plugin {
       return;
     }
 
+    const identity = getCurrentDocumentIdentity();
+    const documentId = identity.key || "unsaved-document";
+    const snapshot = this.editorSelection.captureSelectionSnapshot(documentId);
+    if (!snapshot || snapshot.text !== selectedText) {
+      showToast("The selected text could not be captured safely. Please select it again.", "error");
+      return;
+    }
+
     const settings = this.getSettings();
     const promptKey = withContext ? "optimize_with_context" : "optimize";
     const promptConfig = settings.prompts[promptKey];
@@ -365,126 +463,86 @@ export default class AiEditPlugin extends Plugin {
       userPrompt = `${extraPrompt}\n\n${userPrompt}`;
     }
 
+    const input = Object.freeze({
+      documentId,
+      snapshot,
+      selectedText,
+      documentText,
+      extraPrompt,
+      promptKey,
+      userPrompt,
+      mathEntries: Object.freeze(contextRewrite.mathEntries.map((entry) => Object.freeze({ ...entry }))),
+    });
     let activeRequest = null;
-    let rawOutput = "";
-    let generating = true;
-    let stopped = false;
-    let stoppedCompleted = false;
+    let generation = 0;
     let closed = false;
 
-    const stream = createStreamDialog({
-      title: withContext ? "AI Optimize With Context" : "AI Optimize Selection",
-      waitingText: "Waiting for AI response...",
-      onStop: () => {
-        if (!generating || stopped) {
-          return;
-        }
-        stopped = true;
-        activeRequest?.abort();
-      },
-      onClose: () => {
-        closed = true;
-        if (generating) {
-          activeRequest?.abort();
-        }
-      },
-    });
-
-    function showStoppedCompletion() {
-      if (stoppedCompleted) {
-        return;
-      }
-      stoppedCompleted = true;
-      stream.showCompleted({
-        replaceAllowed: false,
-        validationMessage: "Request stopped. Partial response is available to copy.",
-      });
-    }
-
-    try {
-      const request = createAiRequest({
-        systemPrompt: promptConfig.system,
-        messages: [{ role: "user", content: userPrompt }],
+    let dialog;
+    const currentDocumentId = () => getCurrentDocumentIdentity().key || "unsaved-document";
+    const attempt = () => {
+      const attemptGeneration = ++generation;
+      const previousRequest = activeRequest;
+      return runRewriteAttempt({
+        input,
         settings,
-        onChunk: (chunk) => {
-          if (closed || stopped) {
+        dialog,
+        previousRequest,
+        onRequest: (request) => {
+          if (closed || generation !== attemptGeneration) {
+            request.abort();
             return;
           }
-          rawOutput += chunk;
-          stream.setValue(
-            withContext
-              ? restoreMathPreview(rawOutput, contextRewrite.mathEntries)
-              : rawOutput,
-          );
+          activeRequest = request;
         },
-        onAttemptStart: ({ resetOutput }) => {
-          if (!closed && !stopped && resetOutput) {
-            rawOutput = "";
-            stream.setValue("");
-          }
-        },
+        isCurrent: () => !closed && generation === attemptGeneration,
+        validateReplacement: () => this.editorSelection.validateSelectionSnapshot(
+          input.snapshot,
+          currentDocumentId(),
+        ),
+      }).finally(() => {
+        if (generation === attemptGeneration) activeRequest = null;
       });
-      activeRequest = request;
-      const result = await request.promise;
-      if (activeRequest === request) {
-        activeRequest = null;
-      }
-      generating = false;
-      if (closed) {
-        return;
-      }
-      if (stopped) {
-        showStoppedCompletion();
-        return;
-      }
-      if (!result.trim()) {
-        stream.showError("The model returned an empty response.");
-        return;
-      }
+    };
 
-      let replacement = result;
-      if (withContext) {
-        const restored = restoreMath(result, contextRewrite.mathEntries);
-        stream.setValue(restoreMathPreview(result, contextRewrite.mathEntries));
-        if (!restored.ok) {
-          stream.showCompleted({
-            confirmText: "Replace",
+    dialog = createDiffDialog({
+      title: withContext ? "AI Optimize With Context" : "AI Optimize Selection",
+      originalText: selectedText,
+      diffOptions: {
+        atomicValues: input.mathEntries.map((entry) => entry.source),
+      },
+      onStop: () => {
+        generation += 1;
+        activeRequest?.abort();
+        activeRequest = null;
+      },
+      onRegenerate: () => {
+        void attempt();
+      },
+      onReplace: (candidateText) => {
+        const result = this.editorSelection.replaceSelectionSnapshot(
+          input.snapshot,
+          candidateText,
+          currentDocumentId(),
+        );
+        if (!result.ok) {
+          dialog.complete({
+            candidateText,
             replaceAllowed: false,
-            validationMessage: restored.error,
+            validationMessage: snapshotValidationMessage(result.reason),
           });
           return;
         }
-        replacement = restored.text;
-      }
-
-      stream.showCompleted({
-        confirmText: "Replace",
-        onConfirm: () => {
-          const ok = this.editorSelection.restoreAndReplace(replacement);
-          stream.close();
-          showToast(ok ? "Selection replaced." : "Replace failed.", ok ? "success" : "error");
-        },
-      });
-    } catch (error) {
-      generating = false;
-      activeRequest = null;
-      if (closed) {
-        return;
-      }
-      if (error && error.name === "AbortError") {
-        if (stopped) {
-          showStoppedCompletion();
-          return;
-        }
-        stream.showCompleted({
-          confirmText: "Replace",
-          replaceAllowed: false,
-          validationMessage: "Request cancelled. Partial response was not applied.",
-        });
-      } else {
-        stream.showError(error?.message || "The request failed.");
-      }
-    }
+        dialog.close("replace");
+        showToast("Selection replaced.", "success");
+      },
+      onClose: () => {
+        closed = true;
+        generation += 1;
+        activeRequest?.abort();
+        activeRequest = null;
+      },
+    });
+    return attempt();
   }
 
   async openQaFlow() {

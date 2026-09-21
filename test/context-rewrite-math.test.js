@@ -22,6 +22,7 @@ class FakeElement {
     this.children = [];
     this.parentNode = null;
     this.dataset = {};
+    this.attributes = {};
     this.style = {};
     this.className = "";
     this.classList = { add() {} };
@@ -35,9 +36,12 @@ class FakeElement {
   set id(value) { this._id = value; }
   get id() { return this._id; }
   appendChild(child) { child.parentNode = this; this.children.push(child); return child; }
+  replaceChildren(...children) { this.children = []; children.forEach((child) => this.appendChild(child)); }
   remove() { this.parentNode?.children.splice(this.parentNode.children.indexOf(this), 1); this.parentNode = null; }
   addEventListener(type, listener) { this.listeners.set(type, listener); }
   removeEventListener(type) { this.listeners.delete(type); }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  getAttribute(name) { return this.attributes[name] ?? null; }
   contains(node) { return this === node || this.children.some((child) => child.contains(node)); }
   getBoundingClientRect() { return { left: 0, top: 0, width: 500, height: 300 }; }
   get offsetWidth() { return 500; }
@@ -109,8 +113,9 @@ function installFakeDom() {
   };
   const document = {
     body: null,
+    head: null,
     createElement(tagName) { return new FakeElement(tagName, document); },
-    querySelector(selector) { return document.body.querySelector(selector); },
+    querySelector(selector) { return document.body.querySelector(selector) || document.head.querySelector(selector); },
     getElementById(id) { return document.querySelector(`#${id}`); },
     addEventListener(type, listener) {
       if (type === "keydown") keyListeners.add(listener);
@@ -133,13 +138,20 @@ function installFakeDom() {
     getDragRemoveCount(type) { return dragRemoveCounts[type]; },
   };
   document.body = new FakeElement("body", document);
+  document.head = new FakeElement("head", document);
   globalThis.document = document;
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,
     value: { clipboard: { writeText: async (text) => { copiedText = text; } } },
   });
   document.getCopiedText = () => copiedText;
-  globalThis.window = { ...globalThis.window, innerWidth: 1200, innerHeight: 800, setTimeout(callback) { callback(); } };
+  globalThis.window = {
+    ...globalThis.window,
+    File: { filePath: "C:\\docs\\rewrite.md" },
+    innerWidth: 1200,
+    innerHeight: 800,
+    setTimeout(callback) { callback(); },
+  };
   return document;
 }
 
@@ -150,6 +162,11 @@ function findAction(element, action) {
     if (match) return match;
   }
   return null;
+}
+
+function clickAction(element, action) {
+  const target = findAction(element, action);
+  target?.listeners.get("click")?.({ target });
 }
 
 function completePrompt(document, value = "") {
@@ -210,12 +227,15 @@ function optimizeSettings() {
 
 function createOptimizePlugin(selectedText, documentText = "") {
   const plugin = new AiEditPlugin();
+  const snapshot = { documentId: "doc", text: selectedText, range: {} };
   plugin.editorSelection = {
     getSavedText: () => selectedText,
     getSelectedText: () => selectedText,
     getDocumentText: () => documentText,
+    captureSelectionSnapshot: () => snapshot,
+    validateSelectionSnapshot: () => ({ ok: true }),
     replaced: [],
-    restoreAndReplace(value) { this.replaced.push(value); return true; },
+    replaceSelectionSnapshot(_snapshot, value) { this.replaced.push(value); return { ok: true }; },
   };
   plugin.getSettings = optimizeSettings;
   return plugin;
@@ -329,9 +349,31 @@ test("valid context completion replaces only strict-restored text", async () => 
     const flow = plugin.openOptimizeFlow(true);
     completePrompt(document);
     await flow;
-    const footer = document.getElementById("ai-edit-stream-footer");
-    footer.onclick({ target: findAction(footer, "confirm") });
+    clickAction(document.body, "replace");
     assert.deepEqual(plugin.editorSelection.replaced, ["After $A$"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("replace revalidates the snapshot and keeps a stale candidate open", async () => {
+  const document = installFakeDom();
+  const originalFetch = globalThis.fetch;
+  const plugin = createOptimizePlugin("Original");
+  plugin.editorSelection.replaceSelectionSnapshot = () => ({ ok: false, reason: "selection-changed" });
+  globalThis.fetch = async () => sseResponse(
+    `data: ${JSON.stringify({ choices: [{ delta: { content: "Candidate" } }] })}\n\n`,
+  );
+
+  try {
+    const flow = plugin.openOptimizeFlow(false);
+    completePrompt(document);
+    await flow;
+    clickAction(document.body, "replace");
+
+    assert.ok(document.getElementById("ai-edit-dialog-overlay"));
+    assert.equal(findAction(document.body, "replace"), null);
+    assert.match(document.querySelector(".ai-edit-diff-validation").textContent, /selection changed/i);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -351,11 +393,9 @@ test("stopped optimize flow never replaces a partial response", async () => {
     const flow = plugin.openOptimizeFlow(false);
     completePrompt(document);
     await Promise.resolve();
-    const overlay = document.getElementById("ai-edit-dialog-overlay");
-    overlay.listeners.get("click")({ target: findAction(overlay, "stop") });
+    clickAction(document.body, "stop");
     await flow;
-    const footer = document.getElementById("ai-edit-stream-footer");
-    footer.onclick({ target: findAction(footer, "confirm") });
+    assert.equal(findAction(document.body, "replace"), null);
     assert.deepEqual(plugin.editorSelection.replaced, []);
   } finally {
     globalThis.fetch = originalFetch;
@@ -376,23 +416,24 @@ test("stopping optimize freezes pre-stop output when an abort-ignoring provider 
     const flow = plugin.openOptimizeFlow(false);
     completePrompt(document);
     await new Promise((resolve) => setImmediate(resolve));
-    const overlay = document.getElementById("ai-edit-dialog-overlay");
-    assert.equal(document.getElementById("ai-edit-stream-output").value, "pre-stop optimize");
-    overlay.listeners.get("click")({ target: findAction(overlay, "stop") });
+    assert.equal(document.querySelector(".ai-edit-diff-output").textContent, "pre-stop optimize");
+    clickAction(document.body, "stop");
     request.resolveLate(" late optimize");
     await flow;
 
-    const output = document.getElementById("ai-edit-stream-output");
-    const footer = document.getElementById("ai-edit-stream-footer");
-    assert.equal(output.value, "pre-stop optimize");
+    const output = document.querySelector(".ai-edit-diff-output");
+    const footer = document.querySelector(".ai-edit-dialog-footer");
+    assert.equal(output.textContent, "pre-stop optimize");
     const copy = findAction(footer, "copy");
     assert.ok(copy);
     assert.ok(findAction(footer, "close"));
-    assert.equal(findAction(footer, "confirm"), null);
+    assert.equal(findAction(footer, "replace"), null);
     assert.equal(findAction(footer, "stop"), null);
     assert.deepEqual(plugin.editorSelection.replaced, []);
-    footer.onclick({ target: copy });
+    clickAction(footer, "copy");
     assert.equal(document.getCopiedText(), "pre-stop optimize");
+    assert.ok(document.getElementById("ai-edit-dialog-overlay"));
+    clickAction(footer, "close");
     assert.equal(document.getElementById("ai-edit-dialog-overlay"), null);
   } finally {
     globalThis.fetch = originalFetch;
@@ -419,7 +460,7 @@ test("failover clears primary partial output before rendering backup output", as
     const flow = plugin.openOptimizeFlow(false);
     completePrompt(document);
     await flow;
-    assert.equal(document.getElementById("ai-edit-stream-output").value, "backup output");
+    assert.equal(document.querySelector(".ai-edit-diff-output").textContent, "backup output");
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -113,7 +113,7 @@ export function createDiffDialog(options) {
   }
 
   function complete(result = {}) {
-    if (closed || state === "stopped" || state === "failed" || state === "complete") return;
+    if (closed || state === "stopped" || state === "failed") return;
     state = "complete";
     candidateText = String(result.candidateText ?? "");
     replaceAllowed = result.replaceAllowed !== false;
