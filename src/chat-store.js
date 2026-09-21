@@ -262,12 +262,25 @@ export function createChatStore(options = {}) {
   let initializePromise = null;
   let initialized = false;
   let writeQueue = Promise.resolve();
+  const pendingAssetLeases = new Map();
 
   function timestamp() {
     const value = now();
     const date = value instanceof Date ? value : new Date(value);
     if (Number.isNaN(date.getTime())) throw new Error("Chat history clock returned an invalid date.");
     return date.toISOString();
+  }
+
+  function retainAssetLease(image) {
+    if (image?.assetId) {
+      pendingAssetLeases.set(image.assetId, (pendingAssetLeases.get(image.assetId) || 0) + 1);
+    }
+  }
+
+  function consumeAssetLease(image) {
+    const count = image?.assetId ? pendingAssetLeases.get(image.assetId) : 0;
+    if (count > 1) pendingAssetLeases.set(image.assetId, count - 1);
+    if (count === 1) pendingAssetLeases.delete(image.assetId);
   }
 
   function assetPathFor(image) {
@@ -330,7 +343,7 @@ export function createChatStore(options = {}) {
 
   async function removeLostAssets(before, after) {
     await Promise.all([...before].map(async ([assetId, image]) => {
-      if (after.has(assetId)) return;
+      if (after.has(assetId) || pendingAssetLeases.get(assetId)) return;
       const target = assetPathFor(image);
       if (!target) return;
       try {
@@ -584,7 +597,7 @@ export function createChatStore(options = {}) {
       if (Object.hasOwn(safeInput, "image") && !assetMetadataIsSafe(safeInput.image)) {
         throw new TypeError("Chat message image must be persisted image metadata.");
       }
-      return mutate((nextDatabase) => {
+      const persisted = mutate((nextDatabase) => {
         const document = documentFor(nextDatabase, safeIdentity);
         const session = requireSession(nextDatabase, safeIdentity, safeSessionId);
         const value = {
@@ -604,6 +617,10 @@ export function createChatStore(options = {}) {
         document.lastAccessedAt = session.updatedAt;
         return session;
       }, (nextDatabase) => sessionIsRetained(nextDatabase, safeIdentity, safeSessionId));
+      return persisted.then((result) => {
+        consumeAssetLease(safeInput.image);
+        return result;
+      });
     },
 
     updateMessage(identity, sessionId, messageId, patch) {
@@ -683,6 +700,7 @@ export function createChatStore(options = {}) {
       } catch (error) {
         if (error?.code !== "EEXIST") throw error;
       }
+      retainAssetLease(metadata);
       return metadata;
     },
 

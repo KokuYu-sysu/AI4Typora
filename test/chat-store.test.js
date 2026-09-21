@@ -521,3 +521,43 @@ test("retention pruning removes an asset when it removes the final reference", a
     await assert.rejects(fsPromises.stat(assetPath), { code: "ENOENT" });
   });
 });
+
+test("a saved pending image lease survives deletion of its last prior reference", async () => {
+  await withTempDir(async (baseDir) => {
+    const bytes = Buffer.from([15, 16]);
+    const store = createChatStore({ baseDir, now: clock(), fetch: imageFetch(bytes) });
+    await store.initialize();
+    const oldImage = await store.saveImageAsset("https://example.test/race.png");
+    await store.createSession(documentA, session("race-old"));
+    await store.appendMessage(documentA, "race-old", { ...message("race-old-image", "user"), image: oldImage });
+    const pendingImage = await store.saveImageAsset("https://example.test/race.png");
+    await assert.rejects(
+      store.appendMessage(documentA, "missing-session", { ...message("failed-image", "user"), image: pendingImage }),
+      /session not found/i,
+    );
+    await store.createSession(documentA, session("race-new"));
+
+    await store.deleteSession(documentA, "race-old");
+    await store.appendMessage(documentA, "race-new", { ...message("race-new-image", "user"), image: pendingImage });
+    assert.equal(await store.resolveImageAsset(pendingImage), `data:image/png;base64,${bytes.toString("base64")}`);
+  });
+});
+
+test("each duplicate save keeps an independent pending image lease", async () => {
+  await withTempDir(async (baseDir) => {
+    const bytes = Buffer.from([17, 18]);
+    const store = createChatStore({ baseDir, now: clock(), fetch: imageFetch(bytes) });
+    await store.initialize();
+    const original = await store.saveImageAsset("https://example.test/lease.png");
+    await store.createSession(documentA, session("lease-old"));
+    await store.appendMessage(documentA, "lease-old", { ...message("lease-old-image", "user"), image: original });
+    const firstPending = await store.saveImageAsset("https://example.test/lease.png");
+    const secondPending = await store.saveImageAsset("https://example.test/lease.png");
+    await store.createSession(documentA, session("lease-new"));
+
+    await store.deleteSession(documentA, "lease-old");
+    await store.appendMessage(documentA, "lease-new", { ...message("lease-new-image", "user"), image: firstPending });
+    await store.deleteSession(documentA, "lease-new");
+    assert.equal(await store.resolveImageAsset(secondPending), `data:image/png;base64,${bytes.toString("base64")}`);
+  });
+});
