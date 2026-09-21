@@ -395,6 +395,7 @@ test("stores local, data, and HTTP images by content reference without base64 hi
     assert.equal(local.assetId, data.assetId);
     assert.equal(data.assetId, remote.assetId);
     assert.match(local.storedPath, /^chat-assets\\[a-f0-9]{64}\.png$/);
+    assert.equal(local.byteSize, bytes.length);
     assert.equal(remote.fallbackUrl, "https://example.test/figure.png");
     assert.equal(data.originalSource, "");
     assert.equal(await store.resolveImageAsset(local), `data:image/png;base64,${bytes.toString("base64")}`);
@@ -531,15 +532,70 @@ test("a saved pending image lease survives deletion of its last prior reference"
     await store.createSession(documentA, session("race-old"));
     await store.appendMessage(documentA, "race-old", { ...message("race-old-image", "user"), image: oldImage });
     const pendingImage = await store.saveImageAsset("https://example.test/race.png");
-    await assert.rejects(
-      store.appendMessage(documentA, "missing-session", { ...message("failed-image", "user"), image: pendingImage }),
-      /session not found/i,
-    );
     await store.createSession(documentA, session("race-new"));
 
     await store.deleteSession(documentA, "race-old");
     await store.appendMessage(documentA, "race-new", { ...message("race-new-image", "user"), image: pendingImage });
     assert.equal(await store.resolveImageAsset(pendingImage), `data:image/png;base64,${bytes.toString("base64")}`);
+  });
+});
+
+test("failed image appends release their lease and remove abandoned assets", async () => {
+  await withTempDir(async (baseDir) => {
+    const bytes = Buffer.from([19, 20]);
+    const store = createChatStore({ baseDir, now: clock(), fetch: imageFetch(bytes) });
+    await store.initialize();
+    const image = await store.saveImageAsset("https://example.test/failed.png");
+    const assetPath = path.join(baseDir, image.storedPath);
+    await assert.rejects(
+      store.appendMessage(documentA, "missing-session", { ...message("failed-image", "user"), image }),
+      /session not found/i,
+    );
+    await assert.rejects(fsPromises.stat(assetPath), { code: "ENOENT" });
+  });
+});
+
+test("releaseImageAsset removes an abandoned pending asset and initialization sweeps old orphans", async () => {
+  await withTempDir(async (baseDir) => {
+    const bytes = Buffer.from([21, 22]);
+    const store = createChatStore({ baseDir, now: clock(), fetch: imageFetch(bytes) });
+    await store.initialize();
+    const image = await store.saveImageAsset("https://example.test/release.png");
+    const assetPath = path.join(baseDir, image.storedPath);
+    await store.releaseImageAsset(image.assetId);
+    await assert.rejects(fsPromises.stat(assetPath), { code: "ENOENT" });
+
+    const orphan = path.join(baseDir, "chat-assets", `${"f".repeat(64)}.png`);
+    await fsPromises.writeFile(orphan, bytes);
+    const reloaded = createChatStore({ baseDir, now: clock() });
+    await reloaded.initialize();
+    await assert.rejects(fsPromises.stat(orphan), { code: "ENOENT" });
+  });
+});
+
+test("storage capacity counts unique assets and prunes inactive sessions before rejecting pending assets", async () => {
+  await withTempDir(async (baseDir) => {
+    const bytes = Buffer.alloc(600, 23);
+    const store = createChatStore({ baseDir, now: clock(), maxBytes: 2400, fetch: imageFetch(bytes) });
+    await store.initialize();
+    await store.createSession(documentA, session("old-capacity"));
+    await store.appendMessage(documentA, "old-capacity", message("old-capacity-message", "user", "complete", "x".repeat(1400)));
+
+    const shared = await store.saveImageAsset("https://example.test/capacity.png");
+    assert.equal(await store.getSession(documentA, "old-capacity"), null);
+    await store.createSession(documentA, session("asset-capacity"));
+    await store.appendMessage(documentA, "asset-capacity", { ...message("asset-capacity-message", "user"), image: shared });
+    await assert.doesNotReject(store.saveImageAsset("https://example.test/capacity.png"));
+
+    const tooSmall = createChatStore({
+      baseDir: path.join(baseDir, "too-small"),
+      now: clock(),
+      maxBytes: 500,
+      fetch: imageFetch(bytes),
+    });
+    await tooSmall.initialize();
+    await assert.rejects(tooSmall.saveImageAsset("https://example.test/too-large.png"), /capacity exceeded/i);
+    assert.deepEqual(await readdir(path.join(baseDir, "too-small", "chat-assets")).catch(() => []), []);
   });
 });
 

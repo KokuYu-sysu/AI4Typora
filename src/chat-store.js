@@ -103,7 +103,10 @@ function assetMetadataIsSafe(image) {
   return isImageMimeType(image.mimeType)
     && (image.assetId === "" || ASSET_ID_PATTERN.test(image.assetId))
     && !/^data:/i.test(image.originalSource)
-    && (image.fallbackUrl === "" || isHttpSource(image.fallbackUrl));
+    && (image.fallbackUrl === "" || isHttpSource(image.fallbackUrl))
+    && (!Object.hasOwn(image, "byteSize") || (
+      Number.isInteger(image.byteSize) && image.byteSize >= 0 && image.byteSize <= MAX_IMAGE_BYTES
+    ));
 }
 
 function hasTimestamp(record, key) {
@@ -172,8 +175,8 @@ function serialized(database) {
   return `${JSON.stringify(database, null, 2)}\n`;
 }
 
-function pruneGlobal(database, maxBytes) {
-  while (Buffer.byteLength(serialized(database), "utf8") > maxBytes) {
+function pruneGlobal(database, maxBytes, measureBytes) {
+  while (measureBytes(database) > maxBytes) {
     const candidates = Object.entries(database.documents).flatMap(([documentKey, document]) => (
       document.sessions
         .filter((session) => !isStreaming(session))
@@ -186,7 +189,7 @@ function pruneGlobal(database, maxBytes) {
     document.sessions.splice(document.sessions.indexOf(candidate.session), 1);
     if (document.sessions.length === 0) delete database.documents[candidate.documentKey];
   }
-  return Buffer.byteLength(serialized(database), "utf8") <= maxBytes;
+  return measureBytes(database) <= maxBytes;
 }
 
 function assertDocumentIdentity(identity) {
@@ -263,6 +266,8 @@ export function createChatStore(options = {}) {
   let initialized = false;
   let writeQueue = Promise.resolve();
   const pendingAssetLeases = new Map();
+  const assetSizes = new Map();
+  const assetMetadataById = new Map();
 
   function timestamp() {
     const value = now();
@@ -283,6 +288,19 @@ export function createChatStore(options = {}) {
     if (count === 1) pendingAssetLeases.delete(image.assetId);
   }
 
+  function cacheAsset(image) {
+    if (!image?.assetId) return;
+    assetMetadataById.set(image.assetId, image);
+    if (Number.isInteger(image.byteSize)) assetSizes.set(image.assetId, image.byteSize);
+  }
+
+  function storageBytes(value) {
+    const assetIds = new Set([...referencedAssets(value).keys(), ...pendingAssetLeases.keys()]);
+    let total = Buffer.byteLength(serialized(value), "utf8");
+    for (const assetId of assetIds) total += assetSizes.get(assetId) || 0;
+    return total;
+  }
+
   function assetPathFor(image) {
     if (!assetMetadataIsSafe(image) || !image.assetId) return null;
     const filename = String(image.storedPath || "").replace(/\\/g, "/").split("/").pop();
@@ -301,6 +319,7 @@ export function createChatStore(options = {}) {
       mimeType,
       storedPath: assetId ? path.join(ASSET_DIRECTORY, `${assetId}.${extension}`) : "",
       fallbackUrl: isHttpSource(source) ? source : "",
+      ...(assetId ? { byteSize: bytes?.byteLength || 0 } : {}),
     };
   }
 
@@ -341,19 +360,37 @@ export function createChatStore(options = {}) {
     return assets;
   }
 
-  async function removeLostAssets(before, after) {
-    await Promise.all([...before].map(async ([assetId, image]) => {
-      if (after.has(assetId) || pendingAssetLeases.get(assetId)) return;
-      const target = assetPathFor(image);
-      if (!target) return;
-      try {
-        await fs.unlink(target);
-      } catch (error) {
-        if (error?.code !== "ENOENT") {
-          throw new Error(`Chat history was updated, but image asset cleanup failed: ${error?.message || error}`);
-        }
+  async function removeAssetIfUnused(assetId, image) {
+    if (pendingAssetLeases.get(assetId) || referencedAssets(database).has(assetId)) return;
+    const target = assetPathFor(image || assetMetadataById.get(assetId));
+    if (!target) return;
+    try {
+      await fs.unlink(target);
+    } catch (error) {
+      if (error?.code !== "ENOENT") {
+        throw new Error(`Chat history was updated, but image asset cleanup failed: ${error?.message || error}`);
       }
-    }));
+    }
+    assetSizes.delete(assetId);
+    assetMetadataById.delete(assetId);
+  }
+
+  async function removeLostAssets(before, after) {
+    await Promise.all([...before].map(([assetId, image]) => (
+      after.has(assetId) ? null : removeAssetIfUnused(assetId, image)
+    )));
+  }
+
+  function releaseAssetLease(image) {
+    if (!image?.assetId || !pendingAssetLeases.get(image.assetId)) return Promise.resolve();
+    const operation = writeQueue.then(async () => {
+      if (!initialized) await initialize();
+      if (!pendingAssetLeases.get(image.assetId)) return;
+      consumeAssetLease(image);
+      await removeAssetIfUnused(image.assetId, image);
+    });
+    writeQueue = operation.catch(() => {});
+    return operation;
   }
 
   async function removeStaleTemp() {
@@ -407,9 +444,54 @@ export function createChatStore(options = {}) {
     await removeStaleTemp();
   }
 
+  async function loadLiveAssetSizes() {
+    for (const [assetId, image] of referencedAssets(database)) {
+      cacheAsset(image);
+      const target = assetPathFor(image);
+      if (!target) continue;
+      try {
+        assetSizes.set(assetId, (await fs.stat(target)).size);
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+    }
+  }
+
+  async function removeStartupOrphans() {
+    let filenames;
+    try {
+      filenames = await fs.readdir(assetsPath);
+    } catch (error) {
+      if (error?.code === "ENOENT") return;
+      throw error;
+    }
+    const live = referencedAssets(database);
+    await Promise.all(filenames.map(async (filename) => {
+      const match = /^([a-f0-9]{64})\.[a-z0-9]{1,10}$/i.exec(filename);
+      if (!match || live.has(match[1].toLowerCase())) return;
+      const image = {
+        assetId: match[1].toLowerCase(),
+        originalSource: "",
+        mimeType: imageMimeTypeFromSource(filename),
+        storedPath: path.join(ASSET_DIRECTORY, filename),
+        fallbackUrl: "",
+        byteSize: 0,
+      };
+      const target = assetPathFor(image);
+      if (!target) return;
+      try {
+        await fs.unlink(target);
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+    }));
+  }
+
   async function initialize() {
     if (!initializePromise) {
-      initializePromise = readDatabase().then(() => {
+      initializePromise = readDatabase().then(async () => {
+        await loadLiveAssetSizes();
+        await removeStartupOrphans();
         initialized = true;
       });
     }
@@ -435,7 +517,7 @@ export function createChatStore(options = {}) {
         throw new Error("Chat history capacity exceeded: active sessions cannot be pruned.");
       }
     }
-    if (!pruneGlobal(nextDatabase, maxBytes)) {
+    if (!pruneGlobal(nextDatabase, maxBytes, storageBytes)) {
       throw new Error("Chat history capacity exceeded: active content exceeds the storage limit.");
     }
   }
@@ -445,7 +527,7 @@ export function createChatStore(options = {}) {
     await writeQueue;
   }
 
-  function mutate(change, assertRetained) {
+  function mutate(change, assertRetained, onPersisted) {
     const operation = writeQueue.then(async () => {
       if (!initialized) await initialize();
       const nextDatabase = copy(database);
@@ -455,10 +537,54 @@ export function createChatStore(options = {}) {
       if (assertRetained && !assertRetained(nextDatabase, result)) {
         throw new Error("Chat history capacity exceeded: the changed session cannot be retained.");
       }
+      for (const image of referencedAssets(nextDatabase).values()) cacheAsset(image);
       await writeJsonAtomically(nextDatabase);
       database = nextDatabase;
-      await removeLostAssets(beforeAssets, referencedAssets(nextDatabase));
+      try {
+        onPersisted?.();
+        await removeLostAssets(beforeAssets, referencedAssets(nextDatabase));
+      } catch (error) {
+        error.historyPersisted = true;
+        throw error;
+      }
       return copy(result);
+    });
+    writeQueue = operation.catch(() => {});
+    return operation;
+  }
+
+  function reserveAssetLease(image) {
+    const operation = writeQueue.then(async () => {
+      if (!initialized) await initialize();
+      const nextDatabase = copy(database);
+      const beforeAssets = referencedAssets(database);
+      const priorSize = assetSizes.get(image.assetId);
+      const priorMetadata = assetMetadataById.get(image.assetId);
+      const priorLease = pendingAssetLeases.get(image.assetId) || 0;
+      let persisted = false;
+      cacheAsset(image);
+      retainAssetLease(image);
+      try {
+        retain(nextDatabase);
+        if (serialized(nextDatabase) !== serialized(database)) {
+          await writeJsonAtomically(nextDatabase);
+          database = nextDatabase;
+          persisted = true;
+          await removeLostAssets(beforeAssets, referencedAssets(nextDatabase));
+        }
+      } catch (error) {
+        if (!persisted) {
+          if (priorSize === undefined) assetSizes.delete(image.assetId);
+          else assetSizes.set(image.assetId, priorSize);
+          if (priorMetadata === undefined) assetMetadataById.delete(image.assetId);
+          else assetMetadataById.set(image.assetId, priorMetadata);
+          if (priorLease) pendingAssetLeases.set(image.assetId, priorLease);
+          else pendingAssetLeases.delete(image.assetId);
+        } else {
+          error.historyPersisted = true;
+        }
+        throw error;
+      }
     });
     writeQueue = operation.catch(() => {});
     return operation;
@@ -616,10 +742,12 @@ export function createChatStore(options = {}) {
         session.updatedAt = timestamp();
         document.lastAccessedAt = session.updatedAt;
         return session;
-      }, (nextDatabase) => sessionIsRetained(nextDatabase, safeIdentity, safeSessionId));
-      return persisted.then((result) => {
+      }, (nextDatabase) => sessionIsRetained(nextDatabase, safeIdentity, safeSessionId), () => {
         consumeAssetLease(safeInput.image);
-        return result;
+      });
+      return persisted.catch(async (error) => {
+        if (!error.historyPersisted) await releaseAssetLease(safeInput.image);
+        throw error;
       });
     },
 
@@ -692,16 +820,29 @@ export function createChatStore(options = {}) {
         source: safeSource,
         mimeType: existing ? imageMimeTypeFromSource(existing) : image.mimeType,
         assetId,
+        bytes: image.bytes,
       });
       const target = assetPathFor(metadata);
       if (!target) throw new Error("Image asset path is invalid.");
+      await reserveAssetLease(metadata);
       try {
         await fs.writeFile(target, image.bytes, { flag: "wx" });
       } catch (error) {
-        if (error?.code !== "EEXIST") throw error;
+        if (error?.code !== "EEXIST") {
+          await releaseAssetLease(metadata);
+          throw error;
+        }
       }
-      retainAssetLease(metadata);
       return metadata;
+    },
+
+    releaseImageAsset(asset) {
+      const image = typeof asset === "string"
+        ? assetMetadataById.get(asset)
+        : snapshot(asset, "Image asset metadata");
+      if (!image) return Promise.resolve();
+      if (!assetMetadataIsSafe(image)) throw new TypeError("Image asset metadata is invalid.");
+      return releaseAssetLease(image);
     },
 
     async resolveImageAsset(imageMeta) {
