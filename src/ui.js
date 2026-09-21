@@ -37,6 +37,13 @@ export function ensureStyles() {
     .ai-edit-btn.primary { background: #2563eb; color: #fff; }
     .ai-edit-btn.secondary { background: #eef2f7; color: #111827; }
     .ai-edit-btn.danger { background: #dc2626; color: #fff; }
+    .ai-edit-btn:disabled { cursor: not-allowed; opacity: 0.55; }
+    .ai-edit-diff-output { min-height: 120px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
+    .ai-edit-diff-equal { color: #374151; }
+    .ai-edit-diff-delete { color: #991b1b; background: #fee2e2; text-decoration: line-through; }
+    .ai-edit-diff-insert { color: #166534; background: #dcfce7; text-decoration: none; }
+    .ai-edit-diff-collapsed { margin: 6px 0; border: none; background: #eef2f7; color: #475569; border-radius: 6px; padding: 4px 8px; cursor: pointer; }
+    .ai-edit-diff-validation { margin-right: auto; color: #b45309; font-size: 12px; line-height: 1.35; }
     .ai-edit-setting-grid { display: grid; gap: 10px; margin-top: 12px; }
     .ai-edit-setting-grid label { display: block; font-size: 12px; color: #374151; margin-bottom: 4px; }
     .ai-edit-setting-grid input:not([type="checkbox"]), .ai-edit-setting-grid select, .ai-edit-setting-grid textarea { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 13px; }
@@ -131,6 +138,16 @@ function clearActiveDialog(dialog) {
   if (activeDialog === dialog) {
     activeDialog = null;
   }
+}
+
+// Generic lifecycle hooks let focused dialog modules participate in one active overlay.
+export function registerDialog(dialog) {
+  closeAnyDialog();
+  activeDialog = dialog;
+}
+
+export function unregisterDialog(dialog) {
+  clearActiveDialog(dialog);
 }
 
 function clamp(value, min, max) {
