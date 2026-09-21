@@ -4,6 +4,10 @@ import { createChatService } from "../src/chat-service.js";
 
 const identity = { persistable: true, key: "doc_0123456789abcdef0123456789abcdef", path: "C:\\paper.md", label: "paper.md" };
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+const deferred = () => {
+  let resolve; let reject;
+  return { promise: new Promise((ok, bad) => { resolve = ok; reject = bad; }), resolve, reject };
+};
 
 function fakeStore() {
   const calls = [];
@@ -86,4 +90,30 @@ test("switches abort stale streams and image drafts save once then replay the or
   const follow = service.send("and then?"); await tick();
   assert.equal(factory.made[1].options.messages[0].imageInput, "data:image/png;base64,AA");
   factory.made[1].resolve("ok"); await follow;
+});
+
+test("a document switch during image resolution cannot start or overwrite a stale request", async () => {
+  const store = fakeStore(); const factory = requests(); const image = deferred();
+  store.resolveImageAsset = async () => image.promise;
+  const service = createChatService({ store, createRequest: factory.createRequest });
+  await service.openDraft(identity, { imageSource: "C:\\image.png" });
+  const sending = service.send("describe this"); await tick();
+  await service.openDraft({ ...identity, key: "doc_abcdef0123456789abcdef0123456789" });
+  image.resolve("data:image/png;base64,AA"); await sending;
+  assert.equal(factory.made.length, 0);
+  assert.equal(service.getState().documentIdentity.key, "doc_abcdef0123456789abcdef0123456789");
+  assert.equal(service.getState().activeSession, null);
+});
+
+test("stop during settings resolution persists a stopped assistant and creates no request", async () => {
+  const store = fakeStore(); const factory = requests(); const settings = deferred();
+  const service = createChatService({ store, createRequest: factory.createRequest, resolveSettings: () => settings.promise });
+  await service.openDraft(identity);
+  const sending = service.send("wait for settings"); await tick();
+  assert.equal(service.getState().requestStatus, "streaming");
+  service.stop(); settings.resolve({}); await sending; await tick();
+  assert.equal(factory.made.length, 0);
+  assert.equal(service.getState().requestStatus, "idle");
+  assert.equal(service.getState().activeSession.messages.at(-1).status, "stopped");
+  assert.ok(store.calls.includes("append:assistant:stopped"));
 });

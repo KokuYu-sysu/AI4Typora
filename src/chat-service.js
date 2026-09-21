@@ -168,12 +168,14 @@ export function createChatService({ store, createRequest, resolveSettings = () =
     }
   }
 
-  async function persistAssistant(identity, id, assistant) {
+  async function persistAssistant(identity, id, assistant, requestGeneration = null) {
     const saved = await store.appendMessage(identity, id, assistant);
-    if (state.documentIdentity?.key === identity.key && state.activeSession?.id === id) {
-      set({ activeSession: saved });
-      await refreshSessions(identity);
-    }
+    const isCurrent = () => (requestGeneration == null || same(requestGeneration, identity, id))
+      && state.documentIdentity?.key === identity.key && state.activeSession?.id === id;
+    if (!isCurrent()) return;
+    set({ activeSession: saved });
+    const sessions = await store.listSessions(identity);
+    if (isCurrent()) set({ sessions });
   }
 
   async function send(rawText, options = {}) {
@@ -184,17 +186,26 @@ export function createChatService({ store, createRequest, resolveSettings = () =
       set({ error: "Please save the Markdown document before starting a conversation." });
       return;
     }
+    const requestGeneration = ++generation;
+    const current = (id = "") => generation === requestGeneration
+      && state.documentIdentity?.key === identity.key
+      && (!id || state.activeSession?.id === id);
     let session = state.activeSession;
     let image = state.pendingImage;
     let savedImage = null;
+    let imagePersisted = false;
     try {
       if (!session) {
         if (image) savedImage = hasStoredAsset(image) ? image : await store.saveImageAsset(imageSource(image));
+        if (!current()) {
+          if (savedImage) await store.releaseImageAsset(savedImage);
+          return;
+        }
         const createdAt = timestamp(now);
         session = await store.createSession(identity, {
           id: sessionId(), title: titleFor(text), mode: savedImage ? "image" : "text", createdAt, updatedAt: createdAt,
         });
-        if (state.documentIdentity?.key !== identity.key) {
+        if (!current()) {
           if (savedImage) await store.releaseImageAsset(savedImage);
           return;
         }
@@ -214,19 +225,23 @@ export function createChatService({ store, createRequest, resolveSettings = () =
       const persisted = reusingUser
         ? session
         : await store.appendMessage(identity, session.id, user);
-      if (state.documentIdentity?.key !== identity.key || state.activeSession?.id !== session.id) return;
+      imagePersisted = Boolean(user.image);
+      if (!current(session.id)) return;
       session = persisted;
       set({ activeSession: session, pendingImage: null, error: null });
-      await refreshSessions(identity);
+      const sessions = await store.listSessions(identity);
+      if (!current(session.id)) return;
+      set({ sessions });
 
       const firstImage = session.messages.find((message) => message.role === "user" && message.image)?.image;
       let resolvedImageInput = null;
       if (firstImage) resolvedImageInput = await store.resolveImageAsset(firstImage);
+      if (!current(session.id)) return;
       const assistant = { id: messageId(), role: "assistant", content: "", createdAt: timestamp(now), status: "streaming" };
-      const requestGeneration = ++generation;
-      const current = { ...session, messages: [...session.messages, assistant] };
-      set({ activeSession: current, requestStatus: "streaming", error: null });
+      const streamingSession = { ...session, messages: [...session.messages, assistant] };
+      set({ activeSession: streamingSession, requestStatus: "streaming", error: null });
       const settings = await resolveSettings();
+      if (!current(session.id)) return;
       const prompt = savedImage || firstImage ? settings?.prompts?.image_qa?.system : settings?.prompts?.qa?.system;
       const request = createRequest({
         systemPrompt: prompt || "You are a senior linguistics expert and editor.",
@@ -244,6 +259,10 @@ export function createChatService({ store, createRequest, resolveSettings = () =
           set({ activeSession: { ...session, messages: [...session.messages, { ...assistant }] } });
         },
       });
+      if (!current(session.id)) {
+        request.abort?.();
+        return;
+      }
       activeRequest = request;
       let returned;
       try {
@@ -259,13 +278,13 @@ export function createChatService({ store, createRequest, resolveSettings = () =
       activeRequest = null;
       if (!assistant.content) assistant.content = String(returned || "");
       assistant.status = "complete";
-      await persistAssistant(identity, session.id, assistant);
+      await persistAssistant(identity, session.id, assistant, requestGeneration);
       if (same(requestGeneration, identity, session.id)) set({ requestStatus: "idle", error: null });
     } catch (error) {
-      if (savedImage && (!session || !session.messages?.some((message) => message.image?.assetId === savedImage.assetId))) {
+      if (savedImage && !imagePersisted) {
         await store.releaseImageAsset(savedImage).catch(() => {});
       }
-      if (state.documentIdentity?.key === identity?.key) {
+      if (current(session?.id || "")) {
         lastFailed = { text, sessionId: session?.id || "", messageId: "" };
         set({ requestStatus: "idle", error: String(error?.message || "The request failed. Try again.") });
       }
@@ -276,9 +295,8 @@ export function createChatService({ store, createRequest, resolveSettings = () =
     const identity = state.documentIdentity;
     const session = state.activeSession;
     const assistant = session?.messages?.at(-1);
-    const hadRequest = activeRequest;
     abort();
-    if (!hadRequest || !identity?.persistable || !session || assistant?.role !== "assistant" || assistant.status !== "streaming") {
+    if (!identity?.persistable || !session || assistant?.role !== "assistant" || assistant.status !== "streaming") {
       set({ requestStatus: "idle" });
       return;
     }
