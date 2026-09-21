@@ -154,7 +154,7 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-function makeDialogDraggable(overlay) {
+export function makeDialogDraggable(overlay) {
   const dialog = overlay.querySelector(".ai-edit-dialog");
   const header = overlay.querySelector(".ai-edit-dialog-header");
   if (!dialog || !header) {

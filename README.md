@@ -219,8 +219,12 @@ from different attempts are never concatenated.
 | `Ctrl + E`         | `AI Q&A` when the editor is focused         |
 | `Ctrl + R`         | `AI Optimize (Selection Only)`               |
 | `Ctrl + Shift + R` | `AI Optimize (Use Full Document Context)`    |
-| `Ctrl + C`         | `Copy` content in the output window and close |
-| `Ctrl + Enter`     | `Replace/Insert` with the response           |
+| `Ctrl + C`         | General streaming output window only: copy and close |
+| `Ctrl + Enter`     | General streaming output window only: replace/insert |
+
+The local-rewrite Diff window uses its visible Copy, Regenerate, Replace, and
+Close buttons. Copy does not close that window; `Escape` closes it. `Ctrl + C`
+and `Ctrl + Enter` do not trigger copy or replacement in the Diff window.
 
 ## Development notes
 

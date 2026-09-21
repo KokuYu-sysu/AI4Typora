@@ -1,5 +1,5 @@
 import { buildTextDiff } from "./text-diff.js";
-import { ensureStyles, registerDialog, unregisterDialog } from "./ui.js";
+import { ensureStyles, makeDialogDraggable, registerDialog, unregisterDialog } from "./ui.js";
 
 const COLLAPSE_AFTER = 600;
 const CONTEXT_LENGTH = 220;
@@ -68,6 +68,7 @@ export function createDiffDialog(options) {
   const lifecycle = { close };
   registerDialog(lifecycle);
   document.body.appendChild(overlay);
+  const disposeDrag = makeDialogDraggable(overlay);
   dialogElement.focus?.();
 
   function renderFooter(actions) {
@@ -137,6 +138,7 @@ export function createDiffDialog(options) {
     if (closed) return;
     closed = true;
     document.removeEventListener("keydown", onKeyDown, true);
+    disposeDrag();
     overlay.remove();
     unregisterDialog(lifecycle);
     options.onClose?.({ reason, state, candidateText });

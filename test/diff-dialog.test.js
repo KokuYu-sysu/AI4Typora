@@ -50,16 +50,24 @@ class FakeElement {
 
 function installFakeDom() {
   const keyListeners = new Set();
+  const dragListeners = { mousemove: new Set(), mouseup: new Set() };
   const document = {
     body: null,
     head: null,
     createElement(tagName) { return new FakeElement(tagName, document); },
     querySelector(selector) { return document.body.querySelector(selector) || document.head.querySelector(selector); },
     getElementById(id) { return document.querySelector(`#${id}`); },
-    addEventListener(type, listener) { if (type === "keydown") keyListeners.add(listener); },
-    removeEventListener(type, listener) { if (type === "keydown") keyListeners.delete(listener); },
+    addEventListener(type, listener) {
+      if (type === "keydown") keyListeners.add(listener);
+      if (dragListeners[type]) dragListeners[type].add(listener);
+    },
+    removeEventListener(type, listener) {
+      if (type === "keydown") keyListeners.delete(listener);
+      if (dragListeners[type]) dragListeners[type].delete(listener);
+    },
     fireKey(event) { for (const listener of keyListeners) listener(event); },
     getKeydownListenerCount() { return keyListeners.size; },
+    getDragListenerCount(type) { return dragListeners[type].size; },
   };
   document.body = new FakeElement("body", document);
   document.head = new FakeElement("head", document);
@@ -149,6 +157,18 @@ test("diff dialog has basic dialog semantics and removes Escape handling on clos
   assert.equal(closes, 1);
   assert.equal(document.getElementById("ai-edit-dialog-overlay"), null);
   assert.equal(document.getKeydownListenerCount(), 0);
+});
+
+test("diff dialog reuses shared drag cleanup", () => {
+  const document = installFakeDom();
+  const dialog = createDiffDialog({ title: "Rewrite", originalText: "old" });
+  const header = document.querySelector(".ai-edit-dialog-header");
+  header.listeners.get("mousedown")({ button: 0, target: header, clientX: 1, clientY: 1, preventDefault() {} });
+  assert.equal(document.getDragListenerCount("mousemove"), 1);
+  assert.equal(document.getDragListenerCount("mouseup"), 1);
+  dialog.close();
+  assert.equal(document.getDragListenerCount("mousemove"), 0);
+  assert.equal(document.getDragListenerCount("mouseup"), 0);
 });
 
 test("invalid completion shows validation without an enabled replacement", () => {
