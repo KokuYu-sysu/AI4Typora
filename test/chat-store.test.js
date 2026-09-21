@@ -372,3 +372,93 @@ test("resolves only APPDATA-backed production storage", () => {
   );
   assert.throws(() => getChatDataDirectory({}), /APPDATA.*unavailable/i);
 });
+
+function imageFetch(bytes, mimeType = "image/png") {
+  return async () => ({
+    ok: true,
+    headers: { get: (name) => (name.toLowerCase() === "content-type" ? mimeType : null) },
+    arrayBuffer: async () => Uint8Array.from(bytes).buffer,
+  });
+}
+
+test("stores local, data, and HTTP images by content reference without base64 history", async () => {
+  await withTempDir(async (baseDir) => {
+    const localPath = path.join(baseDir, "figure.png");
+    const bytes = Buffer.from([1, 2, 3, 4]);
+    await fsPromises.writeFile(localPath, bytes);
+    const store = createChatStore({ baseDir, now: clock(), fetch: imageFetch(bytes) });
+    await store.initialize();
+
+    const local = await store.saveImageAsset(localPath);
+    const data = await store.saveImageAsset(`data:image/png;base64,${bytes.toString("base64")}`);
+    const remote = await store.saveImageAsset("https://example.test/figure.png");
+    assert.equal(local.assetId, data.assetId);
+    assert.equal(data.assetId, remote.assetId);
+    assert.match(local.storedPath, /^chat-assets\\[a-f0-9]{64}\.png$/);
+    assert.equal(remote.fallbackUrl, "https://example.test/figure.png");
+    assert.equal(data.originalSource, "");
+    assert.equal(await store.resolveImageAsset(local), `data:image/png;base64,${bytes.toString("base64")}`);
+
+    await store.createSession(documentA, session("image"));
+    await store.appendMessage(documentA, "image", { ...message("image-message", "user"), image: data });
+    const history = await readFile(path.join(baseDir, "chat-history-v1.json"), "utf8");
+    assert.doesNotMatch(history, /base64,/i);
+  });
+});
+
+test("rejects missing and non-image assets while HTTP snapshot failures retain a URL fallback", async () => {
+  await withTempDir(async (baseDir) => {
+    const store = createChatStore({
+      baseDir,
+      now: clock(),
+      fetch: async () => { throw new Error("offline"); },
+    });
+    await store.initialize();
+    await assert.rejects(store.saveImageAsset(path.join(baseDir, "missing.png")), /not found/i);
+    const fallback = await store.saveImageAsset("https://example.test/fallback.jpg");
+    assert.equal(fallback.assetId, "");
+    assert.equal(fallback.fallbackUrl, "https://example.test/fallback.jpg");
+    assert.equal(await store.resolveImageAsset(fallback), fallback.fallbackUrl);
+
+    const textStore = createChatStore({
+      baseDir: path.join(baseDir, "text"),
+      now: clock(),
+      fetch: imageFetch([1], "text/plain"),
+    });
+    await textStore.initialize();
+    await assert.rejects(textStore.saveImageAsset("https://example.test/not-image"), /image/i);
+  });
+});
+
+test("removes an image asset only after its final history reference is deleted", async () => {
+  await withTempDir(async (baseDir) => {
+    const bytes = Buffer.from([5, 6, 7]);
+    const store = createChatStore({ baseDir, now: clock(), fetch: imageFetch(bytes) });
+    await store.initialize();
+    const image = await store.saveImageAsset("https://example.test/shared.png");
+    const assetPath = path.join(baseDir, image.storedPath);
+    await store.createSession(documentA, session("one"));
+    await store.createSession(documentA, session("two"));
+    await store.appendMessage(documentA, "one", { ...message("one-image", "user"), image });
+    await store.appendMessage(documentA, "two", { ...message("two-image", "user"), image });
+
+    await store.deleteSession(documentA, "one");
+    assert.equal((await fsPromises.stat(assetPath)).isFile(), true);
+    await store.deleteSession(documentA, "two");
+    await assert.rejects(fsPromises.stat(assetPath), { code: "ENOENT" });
+
+    const second = await store.saveImageAsset("https://example.test/second.png");
+    const secondPath = path.join(baseDir, second.storedPath);
+    await store.createSession(documentA, session("document-clear"));
+    await store.appendMessage(documentA, "document-clear", { ...message("document-image", "user"), image: second });
+    await store.clearDocument(documentA);
+    await assert.rejects(fsPromises.stat(secondPath), { code: "ENOENT" });
+
+    const third = await store.saveImageAsset("https://example.test/third.png");
+    const thirdPath = path.join(baseDir, third.storedPath);
+    await store.createSession(documentB, session("all-clear"));
+    await store.appendMessage(documentB, "all-clear", { ...message("all-image", "user"), image: third });
+    await store.clearAll();
+    await assert.rejects(fsPromises.stat(thirdPath), { code: "ENOENT" });
+  });
+});

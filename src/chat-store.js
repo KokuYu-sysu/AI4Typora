@@ -4,6 +4,20 @@ const DEFAULT_MAX_BYTES = 100 * 1024 * 1024;
 const MAX_SESSIONS_PER_DOCUMENT = 100;
 const MAX_MESSAGES_PER_SESSION = 200;
 const DOCUMENT_KEY_PATTERN = /^doc_[a-f0-9]{32}$/;
+const ASSET_ID_PATTERN = /^[a-f0-9]{64}$/;
+const ASSET_DIRECTORY = "chat-assets";
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const IMAGE_EXTENSIONS = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/webp": "webp",
+  "image/gif": "gif",
+  "image/bmp": "bmp",
+  "image/tiff": "tiff",
+  "image/svg+xml": "svg",
+  "image/x-icon": "ico",
+  "image/avif": "avif",
+};
 
 function getNodeModule(name) {
   try {
@@ -34,6 +48,62 @@ function hasString(record, key) {
 
 function hasId(record, key = "id") {
   return hasString(record, key) && record[key].trim().length > 0;
+}
+
+function isImageMimeType(value) {
+  return typeof value === "string" && /^image\/[a-z0-9.+-]+$/i.test(value);
+}
+
+function imageMimeTypeFromSource(source) {
+  const value = String(source || "").replace(/[?#].*$/, "").toLowerCase();
+  const extension = value.slice(value.lastIndexOf("."));
+  return Object.entries(IMAGE_EXTENSIONS).find(([, candidate]) => extension === `.${candidate}`)?.[0]
+    || (extension === ".jpeg" ? "image/jpeg" : "image/png");
+}
+
+function extensionForImage(mimeType, source) {
+  return IMAGE_EXTENSIONS[String(mimeType || "").toLowerCase()]
+    || IMAGE_EXTENSIONS[imageMimeTypeFromSource(source)]
+    || "img";
+}
+
+function decodeFileUrl(source) {
+  try {
+    const url = new URL(source);
+    let value = decodeURIComponent(url.pathname || "");
+    if (/^\/[a-z]:\//i.test(value)) value = value.slice(1);
+    return value.replace(/\//g, "\\");
+  } catch (_) {
+    return "";
+  }
+}
+
+function parseDataImage(source) {
+  const match = /^data:([^;,]+)(;base64)?,(.*)$/is.exec(source);
+  if (!match || !isImageMimeType(match[1])) throw new Error("Image data URL must use an image MIME type.");
+  try {
+    return {
+      bytes: match[2] ? Buffer.from(match[3], "base64") : Buffer.from(decodeURIComponent(match[3]), "utf8"),
+      mimeType: match[1].toLowerCase(),
+    };
+  } catch (_) {
+    throw new Error("Image data URL is invalid.");
+  }
+}
+
+function isHttpSource(source) {
+  return /^https?:\/\//i.test(source);
+}
+
+function assetMetadataIsSafe(image) {
+  if (!isRecord(image)) return false;
+  for (const key of ["assetId", "originalSource", "mimeType", "storedPath", "fallbackUrl"]) {
+    if (!hasString(image, key)) return false;
+  }
+  return isImageMimeType(image.mimeType)
+    && (image.assetId === "" || ASSET_ID_PATTERN.test(image.assetId))
+    && !/^data:/i.test(image.originalSource)
+    && (image.fallbackUrl === "" || isHttpSource(image.fallbackUrl));
 }
 
 function hasTimestamp(record, key) {
@@ -138,7 +208,7 @@ function validateMessage(message) {
   if (!isRecord(message) || !hasId(message) || !hasString(message, "role")
     || !hasString(message, "content") || !hasTimestamp(message, "createdAt")
     || !hasString(message, "status")
-    || (Object.hasOwn(message, "image") && !isRecord(message.image))) {
+    || (Object.hasOwn(message, "image") && !assetMetadataIsSafe(message.image))) {
     throw new Error("Chat history contains an invalid message.");
   }
 }
@@ -176,6 +246,8 @@ function createId(prefix) {
 export function createChatStore(options = {}) {
   const fs = options.fs || getNodeModule("fs")?.promises;
   const path = options.path || getNodeModule("path");
+  const fetchImage = options.fetch || globalThis.fetch;
+  const crypto = options.crypto || getNodeModule("crypto");
   const baseDir = String(options.baseDir || "");
   const now = options.now || (() => new Date());
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
@@ -185,6 +257,7 @@ export function createChatStore(options = {}) {
 
   const mainPath = path.join(baseDir, STORE_FILENAME);
   const tempPath = `${mainPath}.tmp`;
+  const assetsPath = path.resolve(baseDir, ASSET_DIRECTORY);
   let database = { version: STORE_VERSION, documents: {} };
   let initializePromise = null;
   let initialized = false;
@@ -195,6 +268,78 @@ export function createChatStore(options = {}) {
     const date = value instanceof Date ? value : new Date(value);
     if (Number.isNaN(date.getTime())) throw new Error("Chat history clock returned an invalid date.");
     return date.toISOString();
+  }
+
+  function assetPathFor(image) {
+    if (!assetMetadataIsSafe(image) || !image.assetId) return null;
+    const filename = String(image.storedPath || "").replace(/\\/g, "/").split("/").pop();
+    if (!new RegExp(`^${image.assetId}\\.[a-z0-9]{1,10}$`, "i").test(filename || "")) return null;
+    const target = path.resolve(assetsPath, filename);
+    const root = String(assetsPath).replace(/[\\/]+$/, "").toLowerCase();
+    const normalizedTarget = String(target).toLowerCase();
+    return normalizedTarget.startsWith(`${root}${path.sep.toLowerCase()}`) ? target : null;
+  }
+
+  function assetMetadata({ source, bytes, mimeType, assetId }) {
+    const extension = extensionForImage(mimeType, source);
+    return {
+      assetId: assetId || "",
+      originalSource: /^data:|^blob:/i.test(source) ? "" : source,
+      mimeType,
+      storedPath: assetId ? path.join(ASSET_DIRECTORY, `${assetId}.${extension}`) : "",
+      fallbackUrl: isHttpSource(source) ? source : "",
+    };
+  }
+
+  async function readImageSource(source) {
+    if (source.startsWith("data:")) return parseDataImage(source);
+    const localPath = source.startsWith("file:") ? decodeFileUrl(source) : source;
+    if (!source.startsWith("blob:") && !isHttpSource(source)) {
+      if (!localPath) throw new Error("Image file URL is invalid.");
+      let bytes;
+      try {
+        bytes = await fs.readFile(localPath);
+      } catch (error) {
+        if (error?.code === "ENOENT") throw new Error(`Image file not found: ${source}`);
+        throw error;
+      }
+      return { bytes: Buffer.from(bytes), mimeType: imageMimeTypeFromSource(localPath) };
+    }
+    if (typeof fetchImage !== "function") throw new Error("Image fetching is unavailable.");
+    const response = await fetchImage(source);
+    if (!response?.ok) throw new Error(`Image download failed${response?.status ? ` (${response.status})` : ""}.`);
+    const mimeType = String(response.headers?.get?.("content-type") || imageMimeTypeFromSource(source))
+      .split(";", 1)[0].trim().toLowerCase();
+    if (!isImageMimeType(mimeType)) throw new Error("Image source did not return an image MIME type.");
+    return { bytes: Buffer.from(await response.arrayBuffer()), mimeType };
+  }
+
+  async function cleanupUnreferencedAssets() {
+    const referenced = new Set();
+    for (const document of Object.values(database.documents)) {
+      for (const session of document.sessions) {
+        for (const message of session.messages) {
+          if (assetMetadataIsSafe(message.image) && message.image.assetId) referenced.add(message.image.assetId);
+        }
+      }
+    }
+    let filenames;
+    try {
+      filenames = await fs.readdir(assetsPath);
+    } catch (error) {
+      if (error?.code === "ENOENT") return;
+      return;
+    }
+    await Promise.all(filenames.map(async (filename) => {
+      const match = /^([a-f0-9]{64})\.[a-z0-9]{1,10}$/i.exec(filename);
+      if (!match || referenced.has(match[1].toLowerCase())) return;
+      const target = path.resolve(assetsPath, filename);
+      const root = String(assetsPath).replace(/[\\/]+$/, "").toLowerCase();
+      if (!String(target).toLowerCase().startsWith(`${root}${path.sep.toLowerCase()}`)) return;
+      try {
+        await fs.unlink(target);
+      } catch (_) {}
+    }));
   }
 
   async function removeStaleTemp() {
@@ -433,8 +578,8 @@ export function createChatStore(options = {}) {
       assertOptionalString(safeInput, "content", "Chat message content");
       assertOptionalString(safeInput, "status", "Chat message status");
       assertOptionalTimestamp(safeInput, "createdAt", "Chat message createdAt");
-      if (Object.hasOwn(safeInput, "image") && !isRecord(safeInput.image)) {
-        throw new TypeError("Chat message image must be an object.");
+      if (Object.hasOwn(safeInput, "image") && !assetMetadataIsSafe(safeInput.image)) {
+        throw new TypeError("Chat message image must be persisted image metadata.");
       }
       return mutate((nextDatabase) => {
         const document = documentFor(nextDatabase, safeIdentity);
@@ -469,8 +614,8 @@ export function createChatStore(options = {}) {
       assertRecord(safePatch, "Chat message patch");
       assertOptionalString(safePatch, "content", "Chat message content");
       assertOptionalString(safePatch, "status", "Chat message status");
-      if (Object.hasOwn(safePatch, "image") && !isRecord(safePatch.image)) {
-        throw new TypeError("Chat message image must be an object.");
+      if (Object.hasOwn(safePatch, "image") && !assetMetadataIsSafe(safePatch.image)) {
+        throw new TypeError("Chat message image must be persisted image metadata.");
       }
       return mutate((nextDatabase) => {
         const document = documentFor(nextDatabase, safeIdentity);
@@ -502,32 +647,89 @@ export function createChatStore(options = {}) {
       }, (nextDatabase) => sessionIsRetained(nextDatabase, safeIdentity, safeSessionId));
     },
 
-    deleteSession(identity, sessionId) {
+    async saveImageAsset(source) {
+      await ready();
+      const safeSource = String(source || "").trim();
+      if (!safeSource) throw new Error("Image source is empty.");
+      let image;
+      try {
+        image = await readImageSource(safeSource);
+      } catch (error) {
+        if (isHttpSource(safeSource) && !/MIME type/i.test(error?.message || "")) {
+          return assetMetadata({ source: safeSource, mimeType: imageMimeTypeFromSource(safeSource) });
+        }
+        throw error;
+      }
+      if (!isImageMimeType(image.mimeType)) throw new Error("Image MIME type is not supported.");
+      if (image.bytes.byteLength > MAX_IMAGE_BYTES) throw new Error("Image exceeds the 20 MB size limit.");
+      if (!crypto?.createHash) throw new Error("Node crypto module is unavailable for image storage.");
+      const assetId = crypto.createHash("sha256").update(image.bytes).digest("hex");
+      await fs.mkdir(assetsPath, { recursive: true });
+      const existing = (await fs.readdir(assetsPath)).find((filename) => (
+        new RegExp(`^${assetId}\\.[a-z0-9]{1,10}$`, "i").test(filename)
+      ));
+      const metadata = assetMetadata({
+        source: safeSource,
+        mimeType: existing ? imageMimeTypeFromSource(existing) : image.mimeType,
+        assetId,
+      });
+      const target = assetPathFor(metadata);
+      if (!target) throw new Error("Image asset path is invalid.");
+      try {
+        await fs.writeFile(target, image.bytes, { flag: "wx" });
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+      }
+      return metadata;
+    },
+
+    async resolveImageAsset(imageMeta) {
+      await ready();
+      const image = snapshot(imageMeta, "Image asset metadata");
+      if (!assetMetadataIsSafe(image)) throw new TypeError("Image asset metadata is invalid.");
+      const target = assetPathFor(image);
+      if (target) {
+        try {
+          const bytes = await fs.readFile(target);
+          return `data:${image.mimeType};base64,${Buffer.from(bytes).toString("base64")}`;
+        } catch (_) {}
+      }
+      if (image.fallbackUrl) return image.fallbackUrl;
+      throw new Error("Stored image asset is unavailable.");
+    },
+
+    async deleteSession(identity, sessionId) {
       const safeIdentity = snapshot(identity, "Document identity");
       const safeSessionId = snapshot(sessionId, "Chat session ID");
       assertDocumentIdentity(safeIdentity);
       assertId(safeSessionId, "Chat session ID");
-      return mutate((nextDatabase) => {
+      const result = await mutate((nextDatabase) => {
         const document = documentFor(nextDatabase, safeIdentity);
         if (!document) return;
         const index = document.sessions.findIndex((session) => session.id === safeSessionId);
         if (index >= 0) document.sessions.splice(index, 1);
         document.lastAccessedAt = timestamp();
       });
+      await cleanupUnreferencedAssets();
+      return result;
     },
 
-    clearDocument(identity) {
+    async clearDocument(identity) {
       const safeIdentity = snapshot(identity, "Document identity");
       assertDocumentIdentity(safeIdentity);
-      return mutate((nextDatabase) => {
+      const result = await mutate((nextDatabase) => {
         delete nextDatabase.documents[safeIdentity.key];
       });
+      await cleanupUnreferencedAssets();
+      return result;
     },
 
-    clearAll() {
-      return mutate((nextDatabase) => {
+    async clearAll() {
+      const result = await mutate((nextDatabase) => {
         nextDatabase.documents = {};
       });
+      await cleanupUnreferencedAssets();
+      return result;
     },
   };
 }
