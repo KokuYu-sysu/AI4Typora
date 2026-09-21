@@ -17,7 +17,7 @@ Included:
 
 - `AI Optimize (Selection Only)`
 - `AI Optimize (Use Full Document Context)`
-- `AI Q&A` via `Ctrl + E` (Support Image in Version 1.4.0)
+- `AI Q&A` via `Ctrl + E` for text and image context, with multi-turn sessions
 - settings page inside Typora Community Plugins
 - Select the model supported
 
@@ -27,6 +27,8 @@ Included:
 - OpenAI-compatible API mode
 - Incremental response streaming for both ChatGPT OAuth and OpenAI-compatible providers
 - Now the response window can be dragged (Version 1.2.0)
+- Local Diff review for selection rewrites, including Regenerate and one-click Replace
+- Per-file multi-turn text and image conversations with explicit history restore
 
 ## Requirements
 
@@ -165,6 +167,30 @@ regenerate, or close it:
 
 The answer can then be inserted into the document.
 
+The conversation window stays open after each response. You can ask follow-up
+questions in the same session, including follow-ups to an image question. Each
+assistant message has its own `Copy` and `Insert` actions; inserting a message
+does not close the conversation window.
+
+Every time the conversation window opens it starts as a blank draft. A session
+record and `session_id` are created only when the first non-empty question is
+sent. Existing sessions are listed in the side rail but are restored only when
+you explicitly select one. `New` always starts another blank draft.
+
+Chat history is stored on Windows at:
+
+```text
+%APPDATA%\typora-ai-edit\chat-history-v1.json
+%APPDATA%\typora-ai-edit\chat-assets\
+```
+
+Retention is bounded to 100 sessions per document, 200 messages per session,
+100 MB of global history and 20 MB per image. Older completed sessions or
+messages may be pruned when a limit is reached. The settings page provides
+confirmation dialogs for clearing the current file's history or all chat
+history. Deleting an individual session from the history rail removes that
+session directly.
+
 ![](https://github.com/KokuYu-sysu/typora-gpt-edit/blob/854981fa4574014331d19f3da39d7ffeb7f8720e/asset/AI_Q&A.png?raw=true)
 
 ### Ask Image
@@ -194,6 +220,13 @@ Output: you can insert the answer to your file or copy it.
   not overwrite prompts that the user has already customized or imported.
 - Chinese and English default prompts are chosen from the browser locale, and
   all prompts can be edited to suit your document and workflow.
+- `Ctrl + E` uses the current editor context. An image target starts an image
+  conversation; a text selection or caret starts a text conversation.
+
+Chat history and chat requests require a saved Markdown document. Unsaved
+documents cannot create or restore persistent chat sessions, persist image
+assets, or safely replace captured text. Save the document before using those
+actions.
 
 ### Context-aware rewrite and formulas
 
@@ -272,12 +305,13 @@ In developing and implementing this project, I used [Aurisper/typora-ai-edit](ht
 - Version 1.2.0: Fixed login-related issues and added prompt import/export support for easier migration.
 - Version 1.3.0: Support an OpenAI-compatible method for using typora-ai-edit plugin.
 - Version 1.4.0: Support AI Q&A to image
-- Unreleased (Phase 1): Added incremental streaming for both providers, a
+- Version 1.5.0: Added streaming output, a
   senior linguistics expert and professional editor default persona while
   preserving custom prompts, context-aware formula protection and exact
   placeholder validation, copyable partial results with replacement disabled
-  after stop/validation failure, and clears partial output during provider
-  failover.
+  after stop/validation failure, local Diff review with safe replacement and
+  regeneration, and per-file multi-turn text/image chat with explicit history
+  restore and bounded local persistence.
 
 ## License
 

@@ -5,7 +5,7 @@
   "author": "KokuYu & OpenAI",
   "authorUrl":"https://github.com/KokuYu-sysu",
   "repo": "KokuYu-sysu/typora-gpt-edit",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "minAppVersion": "1.5.0",
   "minCoreVersion": "2.7.1",
   "platforms": ["win32"]

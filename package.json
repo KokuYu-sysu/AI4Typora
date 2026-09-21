@@ -1,6 +1,6 @@
 ﻿{
   "name": "typora-plugin-ai-edit",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "type": "module",
   "description": "Typing assistance plugin for Typora on Windows",
   "author": "KokuYu & OpenAI",
