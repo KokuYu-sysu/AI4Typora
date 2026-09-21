@@ -462,3 +462,62 @@ test("removes an image asset only after its final history reference is deleted",
     await assert.rejects(fsPromises.stat(thirdPath), { code: "ENOENT" });
   });
 });
+
+test("serializes image references before deleting a competing final reference", async () => {
+  await withTempDir(async (baseDir) => {
+    const bytes = Buffer.from([8, 9, 10]);
+    const store = createChatStore({ baseDir, now: clock(), fetch: imageFetch(bytes) });
+    await store.initialize();
+    const image = await store.saveImageAsset("https://example.test/queued.png");
+    await store.createSession(documentA, session("old-reference"));
+    await store.createSession(documentA, session("new-reference"));
+    await store.appendMessage(documentA, "old-reference", { ...message("old-image", "user"), image });
+
+    const appended = store.appendMessage(documentA, "new-reference", { ...message("new-image", "user"), image });
+    const deleted = store.deleteSession(documentA, "old-reference");
+    await Promise.all([appended, deleted]);
+    assert.equal(await store.resolveImageAsset(image), `data:image/png;base64,${bytes.toString("base64")}`);
+  });
+});
+
+test("reports cleanup errors after persisting the history deletion", async () => {
+  await withTempDir(async (baseDir) => {
+    const bytes = Buffer.from([11, 12]);
+    const guardedFs = {
+      ...fsPromises,
+      async unlink(filePath) {
+        if (String(filePath).includes("chat-assets")) {
+          const error = new Error("asset is locked");
+          error.code = "EPERM";
+          throw error;
+        }
+        return fsPromises.unlink(filePath);
+      },
+    };
+    const store = createChatStore({ baseDir, fs: guardedFs, now: clock(), fetch: imageFetch(bytes) });
+    await store.initialize();
+    const image = await store.saveImageAsset("https://example.test/locked.png");
+    await store.createSession(documentA, session("locked"));
+    await store.appendMessage(documentA, "locked", { ...message("locked-image", "user"), image });
+
+    await assert.rejects(store.deleteSession(documentA, "locked"), /history was updated.*cleanup failed/i);
+    assert.equal(await store.getSession(documentA, "locked"), null);
+  });
+});
+
+test("retention pruning removes an asset when it removes the final reference", async () => {
+  await withTempDir(async (baseDir) => {
+    const bytes = Buffer.from([13, 14]);
+    const store = createChatStore({ baseDir, now: clock(), fetch: imageFetch(bytes) });
+    await store.initialize();
+    const image = await store.saveImageAsset("https://example.test/pruned.png");
+    const assetPath = path.join(baseDir, image.storedPath);
+    await store.createSession(documentA, session("oldest"));
+    await store.appendMessage(documentA, "oldest", { ...message("pruned-image", "user"), image });
+    for (let index = 0; index < 100; index += 1) {
+      await store.createSession(documentA, session(`retained-${index}`));
+    }
+    assert.equal(await store.getSession(documentA, "oldest"), null);
+    await assert.rejects(fsPromises.stat(assetPath), { code: "ENOENT" });
+  });
+});

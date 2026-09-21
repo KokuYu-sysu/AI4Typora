@@ -314,31 +314,32 @@ export function createChatStore(options = {}) {
     return { bytes: Buffer.from(await response.arrayBuffer()), mimeType };
   }
 
-  async function cleanupUnreferencedAssets() {
-    const referenced = new Set();
-    for (const document of Object.values(database.documents)) {
+  function referencedAssets(value) {
+    const assets = new Map();
+    for (const document of Object.values(value.documents)) {
       for (const session of document.sessions) {
         for (const message of session.messages) {
-          if (assetMetadataIsSafe(message.image) && message.image.assetId) referenced.add(message.image.assetId);
+          if (assetMetadataIsSafe(message.image) && message.image.assetId) {
+            assets.set(message.image.assetId, message.image);
+          }
         }
       }
     }
-    let filenames;
-    try {
-      filenames = await fs.readdir(assetsPath);
-    } catch (error) {
-      if (error?.code === "ENOENT") return;
-      return;
-    }
-    await Promise.all(filenames.map(async (filename) => {
-      const match = /^([a-f0-9]{64})\.[a-z0-9]{1,10}$/i.exec(filename);
-      if (!match || referenced.has(match[1].toLowerCase())) return;
-      const target = path.resolve(assetsPath, filename);
-      const root = String(assetsPath).replace(/[\\/]+$/, "").toLowerCase();
-      if (!String(target).toLowerCase().startsWith(`${root}${path.sep.toLowerCase()}`)) return;
+    return assets;
+  }
+
+  async function removeLostAssets(before, after) {
+    await Promise.all([...before].map(async ([assetId, image]) => {
+      if (after.has(assetId)) return;
+      const target = assetPathFor(image);
+      if (!target) return;
       try {
         await fs.unlink(target);
-      } catch (_) {}
+      } catch (error) {
+        if (error?.code !== "ENOENT") {
+          throw new Error(`Chat history was updated, but image asset cleanup failed: ${error?.message || error}`);
+        }
+      }
     }));
   }
 
@@ -435,6 +436,7 @@ export function createChatStore(options = {}) {
     const operation = writeQueue.then(async () => {
       if (!initialized) await initialize();
       const nextDatabase = copy(database);
+      const beforeAssets = referencedAssets(database);
       const result = change(nextDatabase);
       retain(nextDatabase);
       if (assertRetained && !assertRetained(nextDatabase, result)) {
@@ -442,6 +444,7 @@ export function createChatStore(options = {}) {
       }
       await writeJsonAtomically(nextDatabase);
       database = nextDatabase;
+      await removeLostAssets(beforeAssets, referencedAssets(nextDatabase));
       return copy(result);
     });
     writeQueue = operation.catch(() => {});
@@ -698,38 +701,32 @@ export function createChatStore(options = {}) {
       throw new Error("Stored image asset is unavailable.");
     },
 
-    async deleteSession(identity, sessionId) {
+    deleteSession(identity, sessionId) {
       const safeIdentity = snapshot(identity, "Document identity");
       const safeSessionId = snapshot(sessionId, "Chat session ID");
       assertDocumentIdentity(safeIdentity);
       assertId(safeSessionId, "Chat session ID");
-      const result = await mutate((nextDatabase) => {
+      return mutate((nextDatabase) => {
         const document = documentFor(nextDatabase, safeIdentity);
         if (!document) return;
         const index = document.sessions.findIndex((session) => session.id === safeSessionId);
         if (index >= 0) document.sessions.splice(index, 1);
         document.lastAccessedAt = timestamp();
       });
-      await cleanupUnreferencedAssets();
-      return result;
     },
 
-    async clearDocument(identity) {
+    clearDocument(identity) {
       const safeIdentity = snapshot(identity, "Document identity");
       assertDocumentIdentity(safeIdentity);
-      const result = await mutate((nextDatabase) => {
+      return mutate((nextDatabase) => {
         delete nextDatabase.documents[safeIdentity.key];
       });
-      await cleanupUnreferencedAssets();
-      return result;
     },
 
-    async clearAll() {
-      const result = await mutate((nextDatabase) => {
+    clearAll() {
+      return mutate((nextDatabase) => {
         nextDatabase.documents = {};
       });
-      await cleanupUnreferencedAssets();
-      return result;
     },
   };
 }
