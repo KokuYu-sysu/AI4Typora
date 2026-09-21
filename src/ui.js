@@ -58,6 +58,20 @@ export function ensureStyles() {
     .ai-edit-setting-note { margin-top: 8px; font-size: 12px; color: #6b7280; }
     .ai-edit-setting-status.ok { color: #15803d; }
     .ai-edit-setting-status.bad { color: #dc2626; }
+    .ai-edit-chat-panel { position: fixed; right: 0; top: 0; bottom: 0; width: 460px; min-width: 360px; max-width: 720px; z-index: 999996; display: flex; background: #fff; border-left: 1px solid #dbe1ea; box-shadow: -10px 0 28px rgba(15,23,42,.12); color: #111827; font-size: 13px; }
+    .ai-edit-chat-resize { width: 5px; cursor: col-resize; flex: 0 0 5px; }
+    .ai-edit-chat-rail { width: 160px; flex: 0 0 160px; border-right: 1px solid #e5e7eb; overflow: auto; transition: width .15s, flex-basis .15s; }
+    .ai-edit-chat-rail.collapsed { width: 0; flex-basis: 0; overflow: hidden; }
+    .ai-edit-chat-rail-header, .ai-edit-chat-header, .ai-edit-chat-composer, .ai-edit-chat-message-actions { display: flex; align-items: center; gap: 6px; padding: 8px; }
+    .ai-edit-chat-session { display: flex; align-items: center; gap: 2px; padding: 3px 5px; }
+    .ai-edit-chat-session.active { background: #eff6ff; }
+    .ai-edit-chat-session-title { min-width: 0; flex: 1; overflow: hidden; border: none; background: transparent; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+    .ai-edit-chat-session-actions { display: none; }.ai-edit-chat-session:hover .ai-edit-chat-session-actions { display: inline-flex; }
+    .ai-edit-chat-session-actions .ai-edit-btn { padding: 3px 5px; font-size: 11px; }
+    .ai-edit-chat-main { min-width: 0; flex: 1; display: flex; flex-direction: column; }.ai-edit-chat-header { border-bottom: 1px solid #e5e7eb; font-weight: 600; }.ai-edit-chat-header .ai-edit-dialog-close { margin-left: auto; }
+    .ai-edit-chat-error { color: #b91c1c; min-height: 0; padding: 0 8px; }.ai-edit-chat-messages { flex: 1; overflow: auto; padding: 8px; }
+    .ai-edit-chat-message { margin: 0 0 10px; padding: 8px; border-radius: 8px; background: #f8fafc; }.ai-edit-chat-message.user { background: #eff6ff; }.ai-edit-chat-role { font-weight: 600; margin-bottom: 4px; }.ai-edit-chat-content { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+    .ai-edit-chat-composer { border-top: 1px solid #e5e7eb; }.ai-edit-chat-input { flex: 1; min-height: 58px; resize: vertical; border: 1px solid #d1d5db; border-radius: 7px; padding: 6px; font: inherit; }
   `;
   document.head.appendChild(style);
 }
