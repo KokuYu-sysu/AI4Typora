@@ -104,7 +104,7 @@ export function createDiffDialog(options) {
   }
 
   function complete(result = {}) {
-    if (closed) return;
+    if (closed || state === "stopped" || state === "failed" || state === "complete") return;
     state = "complete";
     candidateText = String(result.candidateText ?? "");
     replaceAllowed = result.replaceAllowed !== false;
@@ -116,7 +116,7 @@ export function createDiffDialog(options) {
   }
 
   function fail(message) {
-    if (closed) return;
+    if (closed || state === "stopped" || state === "failed" || state === "complete") return;
     state = "failed";
     replaceAllowed = false;
     validation.textContent = String(message || "Generation failed.");

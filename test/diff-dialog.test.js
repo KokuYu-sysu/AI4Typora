@@ -78,13 +78,11 @@ const { createDiffDialog } = await import("../src/diff-dialog.js");
 
 test("diff dialog streams plain output, then enables complete actions", () => {
   const document = installFakeDom();
-  let stopped = 0;
   let regenerated = 0;
   let replaced = null;
   const dialog = createDiffDialog({
     title: "Rewrite",
     originalText: "old wording",
-    onStop() { stopped += 1; },
     onRegenerate() { regenerated += 1; },
     onReplace(text) { replaced = text; },
   });
@@ -95,11 +93,6 @@ test("diff dialog streams plain output, then enables complete actions", () => {
   assert.equal(output.textContent, "new wording");
   assert.ok(findAction(document.body, "stop"));
 
-  findAction(document.body, "stop").listeners.get("click")({ target: findAction(document.body, "stop") });
-  assert.equal(stopped, 1);
-  assert.ok(findAction(document.body, "regenerate"));
-  assert.equal(findAction(document.body, "replace"), null);
-
   dialog.complete({ candidateText: "new wording", replaceAllowed: true });
   for (const action of ["copy", "regenerate", "close", "replace"]) {
     assert.ok(findAction(document.body, action), `missing ${action}`);
@@ -109,6 +102,26 @@ test("diff dialog streams plain output, then enables complete actions", () => {
   assert.ok(document.getElementById("ai-edit-dialog-overlay"), "regenerate keeps dialog open");
   findAction(document.body, "replace").listeners.get("click")({ target: findAction(document.body, "replace") });
   assert.equal(replaced, "new wording");
+});
+
+test("stopped output ignores late stream and completion without enabling replacement", () => {
+  const document = installFakeDom();
+  let stopped = 0;
+  const dialog = createDiffDialog({
+    title: "Rewrite",
+    originalText: "old wording",
+    onStop() { stopped += 1; },
+  });
+  dialog.beginGeneration();
+  dialog.setStreamingText("partial wording");
+  findAction(document.body, "stop").listeners.get("click")({ target: findAction(document.body, "stop") });
+  dialog.setStreamingText("late wording");
+  dialog.complete({ candidateText: "late completion", replaceAllowed: true });
+
+  assert.equal(stopped, 1);
+  assert.equal(document.querySelector(".ai-edit-diff-output").textContent, "partial wording");
+  assert.ok(findAction(document.body, "regenerate"));
+  assert.equal(findAction(document.body, "replace"), null);
 });
 
 test("invalid completion shows validation without an enabled replacement", () => {
