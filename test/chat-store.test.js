@@ -646,6 +646,71 @@ test("initialization enforces an over-limit history by pruning its oldest inacti
   });
 });
 
+test("bounds remote image reads and turns timed-out HTTP snapshots into fallbacks", async () => {
+  await withTempDir(async (baseDir) => {
+    let aborted = false;
+    const never = async (_source, options) => new Promise((_, reject) => {
+      options.signal.addEventListener("abort", () => {
+        aborted = true;
+        reject(new Error("aborted"));
+      }, { once: true });
+    });
+    const timeoutStore = createChatStore({ baseDir, now: clock(), fetch: never, fetchTimeoutMs: 5 });
+    await timeoutStore.initialize();
+    const fallback = await timeoutStore.saveImageAsset("https://example.test/timeout.png");
+    assert.equal(fallback.fallbackUrl, "https://example.test/timeout.png");
+    assert.equal(aborted, true);
+    await assert.rejects(timeoutStore.saveImageAsset("blob:timeout"), /timed out/i);
+
+    const tooLarge = createChatStore({
+      baseDir: path.join(baseDir, "too-large"),
+      now: clock(),
+      fetch: async () => ({
+        ok: true,
+        headers: { get: (name) => (name === "content-length" ? String(20 * 1024 * 1024 + 1) : "image/png") },
+        arrayBuffer: async () => { throw new Error("must not read body"); },
+      }),
+    });
+    await tooLarge.initialize();
+    await assert.rejects(tooLarge.saveImageAsset("blob:too-large"), /20 MB/i);
+  });
+});
+
+test("refuses symbolic-link asset roots and files", async () => {
+  await withTempDir(async (baseDir) => {
+    const assets = path.join(baseDir, "chat-assets");
+    await fsPromises.mkdir(assets, { recursive: true });
+    const linkedRootFs = {
+      ...fsPromises,
+      async lstat(filePath) {
+        if (path.resolve(filePath) === path.resolve(assets)) return { isSymbolicLink: () => true };
+        return fsPromises.lstat(filePath);
+      },
+    };
+    await assert.rejects(createChatStore({ baseDir, fs: linkedRootFs, now: clock() }).initialize(), /symbolic link/i);
+
+    const bytes = Buffer.from([26]);
+    const writer = createChatStore({ baseDir: path.join(baseDir, "file"), now: clock(), fetch: imageFetch(bytes) });
+    await writer.initialize();
+    const image = await writer.saveImageAsset("https://example.test/link-file.png");
+    await writer.createSession(documentA, session("linked-file"));
+    await writer.appendMessage(documentA, "linked-file", { ...message("linked-file-image", "user"), image });
+    const linkedFileFs = {
+      ...fsPromises,
+      async lstat(filePath) {
+        if (path.resolve(filePath) === path.resolve(path.join(baseDir, "file", image.storedPath))) {
+          return { isSymbolicLink: () => true, size: bytes.length };
+        }
+        return fsPromises.lstat(filePath);
+      },
+    };
+    await assert.rejects(
+      createChatStore({ baseDir: path.join(baseDir, "file"), fs: linkedFileFs, now: clock() }).initialize(),
+      /asset file.*symbolic link/i,
+    );
+  });
+});
+
 test("each duplicate save keeps an independent pending image lease", async () => {
   await withTempDir(async (baseDir) => {
     const bytes = Buffer.from([17, 18]);

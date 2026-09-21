@@ -7,6 +7,7 @@ const DOCUMENT_KEY_PATTERN = /^doc_[a-f0-9]{32}$/;
 const ASSET_ID_PATTERN = /^[a-f0-9]{64}$/;
 const ASSET_DIRECTORY = "chat-assets";
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const DEFAULT_FETCH_TIMEOUT_MS = 10000;
 const IMAGE_EXTENSIONS = {
   "image/png": "png",
   "image/jpeg": "jpg",
@@ -82,11 +83,20 @@ function parseDataImage(source) {
   const match = /^data:([^;,]+)(;base64)?,(.*)$/is.exec(source);
   if (!match || !isImageMimeType(match[1])) throw new Error("Image data URL must use an image MIME type.");
   try {
+    if (match[2] && match[3].length > Math.ceil(MAX_IMAGE_BYTES * 4 / 3) + 4) {
+      throw new Error("Image exceeds the 20 MB size limit.");
+    }
+    if (!match[2] && match[3].length > MAX_IMAGE_BYTES * 3) {
+      throw new Error("Image exceeds the 20 MB size limit.");
+    }
+    const bytes = match[2] ? Buffer.from(match[3], "base64") : Buffer.from(decodeURIComponent(match[3]), "utf8");
+    if (bytes.byteLength > MAX_IMAGE_BYTES) throw new Error("Image exceeds the 20 MB size limit.");
     return {
-      bytes: match[2] ? Buffer.from(match[3], "base64") : Buffer.from(decodeURIComponent(match[3]), "utf8"),
+      bytes,
       mimeType: match[1].toLowerCase(),
     };
-  } catch (_) {
+  } catch (error) {
+    if (/exceeds the 20 MB/i.test(error?.message || "")) throw error;
     throw new Error("Image data URL is invalid.");
   }
 }
@@ -251,12 +261,14 @@ export function createChatStore(options = {}) {
   const path = options.path || getNodeModule("path");
   const fetchImage = options.fetch || globalThis.fetch;
   const crypto = options.crypto || getNodeModule("crypto");
+  const fetchTimeoutMs = options.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
   const baseDir = String(options.baseDir || "");
   const now = options.now || (() => new Date());
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
   if (!fs || !path) throw new Error("Node filesystem access is unavailable for chat history.");
   if (!baseDir) throw new Error("A chat history base directory is required.");
   if (!Number.isFinite(maxBytes) || maxBytes <= 0) throw new Error("Chat history byte limit must be positive.");
+  if (!Number.isFinite(fetchTimeoutMs) || fetchTimeoutMs <= 0) throw new Error("Image fetch timeout must be positive.");
 
   const mainPath = path.join(baseDir, STORE_FILENAME);
   const tempPath = `${mainPath}.tmp`;
@@ -268,6 +280,43 @@ export function createChatStore(options = {}) {
   const pendingAssetLeases = new Map();
   const assetSizes = new Map();
   const assetMetadataById = new Map();
+
+  function comparablePath(value) {
+    const normalized = String(value).replace(/[\\/]+$/, "");
+    return typeof process !== "undefined" && process.platform === "win32"
+      ? normalized.toLowerCase()
+      : normalized;
+  }
+
+  async function ensureSafeAssetsDirectory(create = false) {
+    if (create) await fs.mkdir(assetsPath, { recursive: true });
+    let info;
+    try {
+      info = await fs.lstat(assetsPath);
+    } catch (error) {
+      if (error?.code === "ENOENT" && !create) return false;
+      throw error;
+    }
+    if (info.isSymbolicLink?.()) throw new Error("Chat asset directory must not be a symbolic link.");
+    const actualBase = comparablePath(await fs.realpath(baseDir));
+    const actualAssets = comparablePath(await fs.realpath(assetsPath));
+    if (!actualAssets.startsWith(`${actualBase}${path.sep}`)) {
+      throw new Error("Chat asset directory must remain inside the chat data directory.");
+    }
+    return true;
+  }
+
+  async function lstatAssetFile(target) {
+    if (!await ensureSafeAssetsDirectory()) return null;
+    try {
+      const info = await fs.lstat(target);
+      if (info.isSymbolicLink?.()) throw new Error("Chat asset file must not be a symbolic link.");
+      return info;
+    } catch (error) {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    }
+  }
 
   function timestamp() {
     const value = now();
@@ -323,27 +372,80 @@ export function createChatStore(options = {}) {
     };
   }
 
+  function assertImageSize(size) {
+    if (size > MAX_IMAGE_BYTES) throw new Error("Image exceeds the 20 MB size limit.");
+  }
+
+  async function readFetchBody(response, controller) {
+    const length = Number(response.headers?.get?.("content-length"));
+    if (Number.isFinite(length) && length > MAX_IMAGE_BYTES) {
+      controller.abort();
+      throw new Error("Image exceeds the 20 MB size limit.");
+    }
+    const reader = response.body?.getReader?.();
+    if (!reader) {
+      const bytes = Buffer.from(await response.arrayBuffer());
+      assertImageSize(bytes.byteLength);
+      return bytes;
+    }
+    const chunks = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = Buffer.from(value);
+        total += chunk.byteLength;
+        if (total > MAX_IMAGE_BYTES) {
+          controller.abort();
+          await reader.cancel().catch(() => {});
+          throw new Error("Image exceeds the 20 MB size limit.");
+        }
+        chunks.push(chunk);
+      }
+      return Buffer.concat(chunks, total);
+    } finally {
+      reader.releaseLock?.();
+    }
+  }
+
   async function readImageSource(source) {
     if (source.startsWith("data:")) return parseDataImage(source);
     const localPath = source.startsWith("file:") ? decodeFileUrl(source) : source;
     if (!source.startsWith("blob:") && !isHttpSource(source)) {
       if (!localPath) throw new Error("Image file URL is invalid.");
-      let bytes;
       try {
-        bytes = await fs.readFile(localPath);
+        assertImageSize((await fs.stat(localPath)).size);
+        const bytes = Buffer.from(await fs.readFile(localPath));
+        assertImageSize(bytes.byteLength);
+        return { bytes, mimeType: imageMimeTypeFromSource(localPath) };
       } catch (error) {
         if (error?.code === "ENOENT") throw new Error(`Image file not found: ${source}`);
         throw error;
       }
-      return { bytes: Buffer.from(bytes), mimeType: imageMimeTypeFromSource(localPath) };
     }
-    if (typeof fetchImage !== "function") throw new Error("Image fetching is unavailable.");
-    const response = await fetchImage(source);
-    if (!response?.ok) throw new Error(`Image download failed${response?.status ? ` (${response.status})` : ""}.`);
-    const mimeType = String(response.headers?.get?.("content-type") || imageMimeTypeFromSource(source))
-      .split(";", 1)[0].trim().toLowerCase();
-    if (!isImageMimeType(mimeType)) throw new Error("Image source did not return an image MIME type.");
-    return { bytes: Buffer.from(await response.arrayBuffer()), mimeType };
+    if (typeof fetchImage !== "function" || typeof AbortController === "undefined") {
+      throw new Error("Image fetching is unavailable.");
+    }
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, fetchTimeoutMs);
+    try {
+      const response = await fetchImage(source, { signal: controller.signal });
+      if (!response?.ok) throw new Error(`Image download failed${response?.status ? ` (${response.status})` : ""}.`);
+      const mimeType = String(response.headers?.get?.("content-type") || imageMimeTypeFromSource(source))
+        .split(";", 1)[0].trim().toLowerCase();
+      if (!isImageMimeType(mimeType)) throw new Error("Image source did not return an image MIME type.");
+      return { bytes: await readFetchBody(response, controller), mimeType };
+    } catch (error) {
+      if (timedOut) throw new Error(`Image download timed out after ${fetchTimeoutMs} ms.`);
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   function referencedAssets(value) {
@@ -364,6 +466,11 @@ export function createChatStore(options = {}) {
     if (pendingAssetLeases.get(assetId) || referencedAssets(database).has(assetId)) return;
     const target = assetPathFor(image || assetMetadataById.get(assetId));
     if (!target) return;
+    if (!await lstatAssetFile(target)) {
+      assetSizes.delete(assetId);
+      assetMetadataById.delete(assetId);
+      return;
+    }
     try {
       await fs.unlink(target);
     } catch (error) {
@@ -445,11 +552,13 @@ export function createChatStore(options = {}) {
   }
 
   async function loadLiveAssetSizes() {
+    if (!await ensureSafeAssetsDirectory()) return;
     for (const [assetId, image] of referencedAssets(database)) {
       cacheAsset(image);
       const target = assetPathFor(image);
       if (!target) continue;
       try {
+        if (!await lstatAssetFile(target)) continue;
         assetSizes.set(assetId, (await fs.stat(target)).size);
       } catch (error) {
         if (error?.code !== "ENOENT") throw error;
@@ -458,6 +567,7 @@ export function createChatStore(options = {}) {
   }
 
   async function removeStartupOrphans() {
+    if (!await ensureSafeAssetsDirectory()) return;
     let filenames;
     try {
       filenames = await fs.readdir(assetsPath);
@@ -480,6 +590,7 @@ export function createChatStore(options = {}) {
       const target = assetPathFor(image);
       if (!target) return;
       try {
+        if (!await lstatAssetFile(target)) return;
         await fs.unlink(target);
       } catch (error) {
         if (error?.code !== "ENOENT") throw error;
@@ -602,16 +713,13 @@ export function createChatStore(options = {}) {
   }
 
   async function writeAssetAtomicallyIfMissing(target, bytes) {
-    try {
-      await fs.stat(target);
-      return false;
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-    }
+    await ensureSafeAssetsDirectory(true);
+    if (await lstatAssetFile(target)) return false;
     const suffix = crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const temp = `${target}.${suffix}.tmp`;
     try {
       await fs.writeFile(temp, bytes, { flag: "wx" });
+      await ensureSafeAssetsDirectory(true);
       await fs.rename(temp, target);
       return true;
     } catch (error) {
@@ -869,7 +977,7 @@ export function createChatStore(options = {}) {
       if (image.bytes.byteLength > MAX_IMAGE_BYTES) throw new Error("Image exceeds the 20 MB size limit.");
       if (!crypto?.createHash) throw new Error("Node crypto module is unavailable for image storage.");
       const assetId = crypto.createHash("sha256").update(image.bytes).digest("hex");
-      await fs.mkdir(assetsPath, { recursive: true });
+      await ensureSafeAssetsDirectory(true);
       const existing = (await fs.readdir(assetsPath)).find((filename) => (
         new RegExp(`^${assetId}\\.[a-z0-9]{1,10}$`, "i").test(filename)
       ));
@@ -900,10 +1008,21 @@ export function createChatStore(options = {}) {
       if (!assetMetadataIsSafe(image)) throw new TypeError("Image asset metadata is invalid.");
       const target = assetPathFor(image);
       if (target) {
-        try {
-          const bytes = await fs.readFile(target);
+        const info = await lstatAssetFile(target);
+        if (info) {
+          assertImageSize(info.size);
+          let bytes;
+          try {
+            bytes = await fs.readFile(target);
+          } catch (error) {
+            if (error?.code !== "ENOENT") throw error;
+          }
+          if (bytes) {
+          assertImageSize(bytes.byteLength);
+          await lstatAssetFile(target);
           return `data:${image.mimeType};base64,${Buffer.from(bytes).toString("base64")}`;
-        } catch (_) {}
+          }
+        }
       }
       if (image.fallbackUrl) return image.fallbackUrl;
       throw new Error("Stored image asset is unavailable.");
