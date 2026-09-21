@@ -6,6 +6,7 @@ function installEditor({ text = "original", connected = true, documentId = "doc_
   const container = { nodeType: 1, isConnected: connected, parentElement: null };
   const makeRange = () => ({
     startContainer: container,
+    endContainer: container,
     toString() { return text; },
     cloneRange: makeRange,
   });
@@ -52,6 +53,16 @@ function installEditor({ text = "original", connected = true, documentId = "doc_
   const controller = new EditorSelectionController();
   const snapshot = controller.captureSelectionSnapshot(fixture.documentId);
   assert.deepEqual(controller.validateSelectionSnapshot(snapshot, fixture.documentId), { ok: false, reason: "range-detached" });
+}
+
+{
+  const fixture = installEditor();
+  const controller = new EditorSelectionController();
+  const snapshot = controller.captureSelectionSnapshot(fixture.documentId);
+  snapshot.range.endContainer = { nodeType: 1, isConnected: true, parentElement: null };
+  assert.deepEqual(controller.validateSelectionSnapshot(snapshot, fixture.documentId), { ok: false, reason: "range-detached" });
+  assert.deepEqual(controller.replaceSelectionSnapshot(snapshot, "replacement", fixture.documentId), { ok: false, reason: "range-detached" });
+  assert.deepEqual(fixture.commands, []);
 }
 
 {

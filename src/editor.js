@@ -290,7 +290,8 @@
       return { ok: false, reason: "document-changed" };
     }
     const writeEl = document.getElementById("write");
-    if (!writeEl || !this.isRangeUsable(snapshot.range, writeEl)) {
+    if (!writeEl || !this.isRangeUsable(snapshot.range, writeEl)
+      || !this.isRangeUsable({ startContainer: snapshot.range?.endContainer }, writeEl)) {
       return { ok: false, reason: "range-detached" };
     }
     try {
