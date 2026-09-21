@@ -67,12 +67,31 @@ function getNodeModule(name) {
   } catch (_) {}
 
   try {
+    if (typeof process !== "undefined" && typeof process.getBuiltinModule === "function") {
+      return process.getBuiltinModule(name);
+    }
+  } catch (_) {}
+
+  try {
     if (typeof require === "function") {
       return require(name);
     }
   } catch (_) {}
 
   return null;
+}
+
+export function getChatDataDirectory(env = null) {
+  const appData = env === null ? getEnvValue(null, "APPDATA") : String(env.APPDATA || "");
+  if (!appData) {
+    throw new Error("APPDATA is unavailable; chat history cannot be stored safely.");
+  }
+  const fs = getNodeModule("fs");
+  const pathModule = getNodeModule("path");
+  if (!fs || !pathModule?.join) {
+    throw new Error("Node filesystem access is unavailable for chat history.");
+  }
+  return pathModule.join(appData, "typora-ai-edit");
 }
 
 function normalizeForFs(filePath) {
