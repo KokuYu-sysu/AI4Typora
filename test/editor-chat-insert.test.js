@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 
 import { EditorSelectionController } from "../src/editor.js";
 
-function install({ connected = true, key = "doc_a" } = {}) {
+function install({ connected = true, key = "doc_a", persistable = true } = {}) {
   const listeners = new Map();
   const editorNode = { nodeType: 1, isConnected: connected };
   const range = {
@@ -34,13 +34,19 @@ function install({ connected = true, key = "doc_a" } = {}) {
     createRange() { return { selectNodeContents(node) { this.target = node; }, collapse() {}, startContainer: finalBlock }; },
     execCommand(command, _ui, value) { calls.push([command, value]); return true; },
   };
-  return { calls, events, finalBlock, listeners, range, selection, setKey(value) { key = value; }, trigger() { listeners.get("selectionchange")?.(); }, writeEl, getKey() { return key; } };
+  return {
+    calls, events, finalBlock, listeners, range, selection,
+    identity() { return { key, persistable }; },
+    setKey(value) { key = value; },
+    setPersistable(value) { persistable = value; },
+    trigger() { listeners.get("selectionchange")?.(); }, writeEl,
+  };
 }
 
 {
   const fixture = install();
   const controller = new EditorSelectionController();
-  controller.startCaretTracking(() => ({ key: fixture.getKey() }));
+  controller.startCaretTracking(() => fixture.identity());
   fixture.trigger();
   assert.equal(controller.lastCaretRange, fixture.range);
   assert.equal(controller.lastCaretDocumentKey, "doc_a");
@@ -51,12 +57,14 @@ function install({ connected = true, key = "doc_a" } = {}) {
   assert.equal(controller.lastCaretRange, fixture.range);
   controller.stopCaretTracking();
   assert.equal(fixture.listeners.has("selectionchange"), false);
+  assert.equal(controller.lastCaretRange, null);
+  assert.equal(controller.lastCaretDocumentKey, "");
 }
 
 {
   const fixture = install();
   const controller = new EditorSelectionController();
-  controller.startCaretTracking(() => ({ key: fixture.getKey() }));
+  controller.startCaretTracking(() => fixture.identity());
   fixture.trigger();
   assert.deepEqual(controller.insertMarkdownAtLastCaret("answer"), { ok: true });
   assert.deepEqual(fixture.calls, [["insertText", "\n\nanswer\n\n"]]);
@@ -73,9 +81,9 @@ function install({ connected = true, key = "doc_a" } = {}) {
     startContainer: fixture.finalBlock,
   });
   const controller = new EditorSelectionController();
-  controller.startCaretTracking(() => ({ key: fixture.getKey() }));
+  controller.startCaretTracking(() => fixture.identity());
   fixture.trigger();
-  fixture.range.startContainer.isConnected = false;
+  fixture.range.endContainer = { nodeType: 1, isConnected: false };
   assert.deepEqual(controller.insertMarkdownAtLastCaret("answer"), { ok: true });
   assert.equal(fallbackTarget, fixture.finalBlock);
 }
@@ -83,10 +91,30 @@ function install({ connected = true, key = "doc_a" } = {}) {
 {
   const fixture = install();
   const controller = new EditorSelectionController();
-  controller.startCaretTracking(() => ({ key: fixture.getKey() }));
+  controller.startCaretTracking(() => fixture.identity());
   fixture.trigger();
   fixture.setKey("doc_b");
   assert.deepEqual(controller.insertMarkdownAtLastCaret("answer"), { ok: false, reason: "document-changed" });
+}
+
+for (const setup of [
+  {
+    name: "unsaved documents never retain a reusable caret",
+    mutate(fixture) { fixture.setPersistable(false); fixture.trigger(); },
+    expected: { ok: false, reason: "document-unsaved" },
+  },
+  {
+    name: "a detached final block is not an insertion fallback",
+    mutate(fixture) { fixture.range.startContainer.isConnected = false; fixture.finalBlock.isConnected = false; },
+    expected: { ok: false, reason: "no-valid-caret" },
+  },
+]) {
+  const fixture = install();
+  const controller = new EditorSelectionController();
+  controller.startCaretTracking(() => fixture.identity());
+  fixture.trigger();
+  setup.mutate(fixture);
+  assert.deepEqual(controller.insertMarkdownAtLastCaret("answer"), setup.expected, setup.name);
 }
 
 console.log("editor chat insert tests passed");

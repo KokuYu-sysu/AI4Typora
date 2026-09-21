@@ -134,11 +134,14 @@
         const writeEl = document.getElementById("write");
         if (!selection || !writeEl || selection.rangeCount === 0) return;
         const range = selection.getRangeAt(0).cloneRange();
-        if (!this.isRangeUsable(range, writeEl)
-          || !this.isRangeUsable({ startContainer: range.endContainer }, writeEl)) return;
+        if (!this.isChatCaretRangeUsable(range, writeEl)) return;
         const identity = this.getCaretDocumentIdentity && this.getCaretDocumentIdentity();
         const key = String(identity?.key || "");
-        if (!key) return;
+        if (!identity?.persistable || !key) {
+          this.lastCaretRange = null;
+          this.lastCaretDocumentKey = "";
+          return;
+        }
         this.lastCaretRange = range;
         this.lastCaretDocumentKey = key;
       } catch (_) {}
@@ -152,6 +155,16 @@
     }
     this.caretTrackingHandler = null;
     this.getCaretDocumentIdentity = null;
+    this.lastCaretRange = null;
+    this.lastCaretDocumentKey = "";
+  }
+
+  isChatCaretRangeUsable(range, writeEl) {
+    const belongsToWrite = (node) => {
+      const element = node && (node.nodeType === 1 ? node : node.parentElement);
+      return !!(element && element.isConnected && writeEl && writeEl.contains && writeEl.contains(element));
+    };
+    return !!(range && belongsToWrite(range.startContainer) && belongsToWrite(range.endContainer));
   }
 
   insertMarkdownAtLastCaret(text) {
@@ -159,7 +172,9 @@
     try {
       const selection = window.getSelection();
       const writeEl = document.getElementById("write");
-      const currentKey = String(this.getCaretDocumentIdentity?.()?.key || "");
+      const identity = this.getCaretDocumentIdentity?.();
+      if (identity && !identity.persistable) return { ok: false, reason: "document-unsaved" };
+      const currentKey = String(identity?.key || "");
       if (!selection || !writeEl || !this.lastCaretRange || !this.lastCaretDocumentKey) {
         return { ok: false, reason: "no-caret" };
       }
@@ -169,9 +184,11 @@
       try {
         range = this.lastCaretRange.cloneRange();
       } catch (_) {}
-      if (!this.isRangeUsable(range, writeEl)) {
+      if (!this.isChatCaretRangeUsable(range, writeEl)) {
         const target = writeEl.lastElementChild;
-        if (!target) return { ok: false, reason: "range-detached" };
+        if (!target || !target.isConnected || !writeEl.contains(target)) {
+          return { ok: false, reason: "no-valid-caret" };
+        }
         range = document.createRange();
         range.selectNodeContents(target);
         range.collapse(false);
