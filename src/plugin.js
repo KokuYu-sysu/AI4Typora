@@ -282,6 +282,31 @@ export default class AiEditPlugin extends Plugin {
       .catch(() => {});
   }
 
+  getCurrentDocumentIdentity() {
+    return this.chatRuntime.getDocumentIdentity();
+  }
+
+  async resetOpenChatPanel() {
+    if (this.chatPanel?.isOpen?.()) {
+      await this.chatPanel.open({ mode: "text" });
+    }
+  }
+
+  async clearCurrentFileChatHistory(identity = this.getCurrentDocumentIdentity()) {
+    if (!identity?.persistable) {
+      throw new Error("Save the Markdown document before clearing its chat history.");
+    }
+    await this.chatService?.stop?.();
+    await this.chatStore?.clearDocument(identity);
+    await this.resetOpenChatPanel();
+  }
+
+  async clearAllChatHistory() {
+    await this.chatService?.stop?.();
+    await this.chatStore?.clearAll();
+    await this.resetOpenChatPanel();
+  }
+
   getSettings() {
     return mergeSettings({
       provider: this.settings.get("provider"),

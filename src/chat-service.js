@@ -309,11 +309,11 @@ export function createChatService({ store, createRequest, resolveSettings = () =
     abort();
     if (!identity?.persistable || !session || assistant?.role !== "assistant" || assistant.status !== "streaming") {
       set({ requestStatus: "idle" });
-      return;
+      return Promise.resolve();
     }
     const stopped = { ...assistant, status: "stopped" };
     set({ activeSession: { ...session, messages: [...session.messages.slice(0, -1), stopped] }, requestStatus: "idle", error: null });
-    void persistAssistant(identity, session.id, stopped).catch((error) => {
+    return persistAssistant(identity, session.id, stopped).catch((error) => {
       if (state.documentIdentity?.key === identity.key && state.activeSession?.id === session.id) {
         set({ error: String(error?.message || "Unable to save the stopped response.") });
       }

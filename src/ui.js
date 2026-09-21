@@ -335,6 +335,78 @@ export function promptForText(options) {
   });
 }
 
+/** A small, destructive-action confirmation that shares the plugin dialog lifecycle. */
+export function confirmAction({ title = "Confirm", message = "", confirmText = "Confirm" } = {}) {
+  closeAnyDialog();
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.id = "ai-edit-dialog-overlay";
+    overlay.className = "ai-edit-overlay";
+    const dialogElement = document.createElement("div");
+    dialogElement.className = "ai-edit-dialog";
+    const header = document.createElement("div");
+    header.className = "ai-edit-dialog-header";
+    const heading = document.createElement("div");
+    heading.className = "ai-edit-dialog-title";
+    heading.textContent = String(title);
+    const close = document.createElement("button");
+    close.className = "ai-edit-dialog-close";
+    close.dataset.action = "cancel";
+    close.setAttribute("aria-label", "Cancel");
+    close.textContent = "×";
+    header.append(heading, close);
+    const body = document.createElement("div");
+    body.className = "ai-edit-dialog-body";
+    body.textContent = String(message);
+    const footer = document.createElement("div");
+    footer.className = "ai-edit-dialog-footer";
+    const cancel = document.createElement("button");
+    cancel.className = "ai-edit-btn secondary";
+    cancel.dataset.action = "cancel";
+    cancel.type = "button";
+    cancel.textContent = "Cancel";
+    const spacer = document.createElement("div");
+    spacer.className = "ai-edit-spacer";
+    const confirm = document.createElement("button");
+    confirm.className = "ai-edit-btn danger";
+    confirm.dataset.action = "confirm";
+    confirm.type = "button";
+    confirm.textContent = String(confirmText);
+    footer.append(cancel, spacer, confirm);
+    dialogElement.append(header, body, footer);
+    overlay.appendChild(dialogElement);
+    document.body.appendChild(overlay);
+    const disposeDrag = makeDialogDraggable(overlay);
+    let finished = false;
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        finish(false);
+      }
+    };
+    const dialog = { close: () => finish(false) };
+    activeDialog = dialog;
+
+    function finish(value) {
+      if (finished) return;
+      finished = true;
+      document.removeEventListener("keydown", onKeyDown, true);
+      disposeDrag();
+      closeOverlay(overlay);
+      clearActiveDialog(dialog);
+      resolve(value);
+    }
+
+    overlay.addEventListener("click", (event) => {
+      const action = event.target?.dataset?.action;
+      if (event.target === overlay || action === "cancel") finish(false);
+      if (action === "confirm") finish(true);
+    });
+    document.addEventListener("keydown", onKeyDown, true);
+    window.setTimeout(() => cancel.focus(), 0);
+  });
+}
+
 export function createStreamDialog(options) {
   closeAnyDialog();
   const overlay = document.createElement("div");

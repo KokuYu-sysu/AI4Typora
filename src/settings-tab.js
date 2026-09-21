@@ -12,6 +12,7 @@ import {
   importPromptSettingsFromFile,
   loginOpenAiOauthInteractive,
 } from "./platform.js";
+import { confirmAction } from "./ui.js";
 
 const CUSTOM_MODEL_VALUE = "__custom__";
 
@@ -60,6 +61,46 @@ function readModelValue(container, selectId, inputId) {
   return presetValue.trim();
 }
 
+export function bindChatHistoryControls(container, plugin, {
+  confirm = confirmAction,
+  notify = (message) => new Notice(message),
+} = {}) {
+  const current = container.querySelector("#ai-edit-clear-current-history");
+  const all = container.querySelector("#ai-edit-clear-all-history");
+  if (!current || !all) return;
+  current.disabled = !plugin.getCurrentDocumentIdentity?.()?.persistable;
+
+  current.addEventListener("click", async () => {
+    const identity = plugin.getCurrentDocumentIdentity?.();
+    if (!identity?.persistable) return;
+    if (!await confirm({
+      title: "Clear current file history?",
+      message: "This permanently deletes all AI conversations for the current file.",
+      confirmText: "Clear history",
+    })) return;
+    try {
+      await plugin.clearCurrentFileChatHistory(identity);
+      notify("Current file chat history cleared.");
+    } catch (error) {
+      notify(`Could not clear current file history: ${error?.message || "Unknown error"}`);
+    }
+  });
+
+  all.addEventListener("click", async () => {
+    if (!await confirm({
+      title: "Clear all chat history?",
+      message: "This permanently deletes AI conversations for every file.",
+      confirmText: "Clear all history",
+    })) return;
+    try {
+      await plugin.clearAllChatHistory();
+      notify("All chat history cleared.");
+    } catch (error) {
+      notify(`Could not clear all chat history: ${error?.message || "Unknown error"}`);
+    }
+  });
+}
+
 export class AiEditSettingTab extends SettingTab {
   constructor(plugin) {
     super();
@@ -76,6 +117,7 @@ export class AiEditSettingTab extends SettingTab {
 
   render() {
     const settings = this.plugin.getSettings();
+    const documentIdentity = this.plugin.getCurrentDocumentIdentity?.();
     const status = getOAuthStatus(settings);
     const chatgptModel = getModelUiState(settings.model, CHATGPT_MODEL_PRESETS);
     const compatModel = getModelUiState(settings.openaiCompat.model, OPENAI_COMPAT_MODEL_PRESETS);
@@ -227,6 +269,14 @@ export class AiEditSettingTab extends SettingTab {
           <label for="ai-edit-image-qa-user">Image Q&amp;A User Prompt</label>
           <textarea id="ai-edit-image-qa-user" rows="3">${escapeHtml(settings.prompts.image_qa.user)}</textarea>
         </div>
+        <div class="ai-edit-setting-card">
+          <div class="ai-edit-setting-card-title">Chat History</div>
+          <div class="ai-edit-setting-card-note">Clearing history is permanent and does not change your AI settings.</div>
+          <div style="margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;">
+            <button class="ai-edit-btn danger" id="ai-edit-clear-current-history" ${documentIdentity?.persistable ? "" : "disabled"}>Clear Current File History</button>
+            <button class="ai-edit-btn danger" id="ai-edit-clear-all-history">Clear All Chat History</button>
+          </div>
+        </div>
       </div>
       <div style="margin-top: 14px; display: flex; gap: 10px;">
         <button class="ai-edit-btn primary" id="ai-edit-save-settings">Save</button>
@@ -239,6 +289,7 @@ export class AiEditSettingTab extends SettingTab {
     container.querySelector("#ai-edit-compat-model-preset").addEventListener("change", () => {
       toggleCustomModelInput(container, "ai-edit-compat-model-preset", "ai-edit-compat-model-custom");
     });
+    bindChatHistoryControls(container, this.plugin);
 
     container.querySelector("#ai-edit-oauth-login").addEventListener("click", async () => {
       const oauthTokenPath = container.querySelector("#ai-edit-oauth-path").value.trim();
