@@ -216,6 +216,32 @@ test("prunes the oldest complete turn while protecting a streaming message", asy
   });
 });
 
+test("prunes the oldest finished message when no complete turn exists", async () => {
+  await withTempDir(async (baseDir) => {
+    const store = createChatStore({ baseDir, now: clock() });
+    await store.initialize();
+    await store.createSession(documentA, session("unanswered", {
+      messages: Array.from({ length: 201 }, (_, index) => message(`u${index}`, "user")),
+    }));
+
+    const saved = await store.getSession(documentA, "unanswered");
+    assert.equal(saved.messages.length, 200);
+    assert.equal(saved.messages[0].id, "u1");
+  });
+});
+
+test("does not prune a session containing only active streaming messages", async () => {
+  await withTempDir(async (baseDir) => {
+    const store = createChatStore({ baseDir, now: clock() });
+    await store.initialize();
+    await store.createSession(documentA, session("active-only", {
+      messages: Array.from({ length: 201 }, (_, index) => message(`s${index}`, "assistant", "streaming")),
+    }));
+
+    assert.equal((await store.getSession(documentA, "active-only")).messages.length, 201);
+  });
+});
+
 test("enforces an injectable global byte limit by pruning LRU inactive sessions", async () => {
   await withTempDir(async (baseDir) => {
     const store = createChatStore({ baseDir, now: clock(), maxBytes: 1500 });

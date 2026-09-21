@@ -43,8 +43,16 @@ function pruneMessages(session) {
         break;
       }
     }
-    if (turnEnd < 0) break;
-    session.messages.splice(0, turnEnd + 1);
+    if (turnEnd >= 0) {
+      session.messages.splice(0, turnEnd + 1);
+      continue;
+    }
+
+    // A long, unanswered input sequence is not a complete turn, but it must
+    // still observe the retention limit. Never remove an active stream.
+    const oldestFinishedMessage = session.messages.findIndex((message) => message.status !== "streaming");
+    if (oldestFinishedMessage < 0) break;
+    session.messages.splice(oldestFinishedMessage, 1);
   }
 }
 
