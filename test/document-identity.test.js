@@ -21,7 +21,8 @@ assert.equal(
 );
 assert.equal(hashDocumentPath("c:\\docs\\one.md"), hashDocumentPath("C:\\DOCS\\ONE.MD"));
 assert.notEqual(hashDocumentPath("c:\\docs\\one.md"), hashDocumentPath("c:\\docs\\two.md"));
-assert.match(hashDocumentPath("c:\\docs\\one.md"), /^[a-f0-9]{64}$/);
+assert.match(hashDocumentPath("c:\\docs\\one.md"), /^[a-f0-9]{32}$/);
+assert.equal(hashDocumentPath("c:\\docs\\one.md").length, 32);
 
 {
   const identity = getCurrentDocumentIdentity({

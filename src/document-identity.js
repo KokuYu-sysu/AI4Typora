@@ -33,7 +33,7 @@ export function hashDocumentPath(normalizedPath) {
   const value = normalizeWindowsDocumentPath(normalizedPath);
   const crypto = getNodeModule("crypto");
   if (!value || !crypto?.createHash) return "";
-  return crypto.createHash("sha256").update(value, "utf8").digest("hex");
+  return crypto.createHash("sha256").update(value, "utf8").digest("hex").slice(0, 32);
 }
 
 function filePathFromLocation(location) {
