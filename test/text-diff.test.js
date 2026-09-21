@@ -203,6 +203,48 @@ test("large token matrices use a deterministic delete-insert fallback", () => {
   ]);
 });
 
+test("atomic value lookup scales with occurrences instead of candidate matches", () => {
+  const values = Array.from(
+    { length: 300 },
+    (_, index) => `value-${String(index).padStart(3, "0")}`,
+  );
+  const text = values.join(" ");
+  const originalIndexOf = String.prototype.indexOf;
+  let calls = 0;
+
+  String.prototype.indexOf = function (...args) {
+    calls += 1;
+    return originalIndexOf.apply(this, args);
+  };
+  try {
+    assertReconstructable(text, text, { atomicValues: values });
+  } finally {
+    String.prototype.indexOf = originalIndexOf;
+  }
+
+  assert.ok(calls <= values.length * 6, `expected bounded lookups, got ${calls}`);
+});
+
+test("diff options reject invalid atomic ranges and matrix limits", () => {
+  for (const ranges of [
+    [{ start: -1, end: 1 }],
+    [{ start: 1, end: 1 }],
+    [{ start: 0, end: 4 }],
+    [{ start: 0, end: 2 }, { start: 1, end: 3 }],
+  ]) {
+    assert.throws(
+      () => buildTextDiff("abc", "abc", { atomicRanges: ranges }),
+      RangeError,
+    );
+  }
+  for (const maxMatrixCells of [-1, 1.5, Number.NaN, "4"]) {
+    assert.throws(
+      () => buildTextDiff("abc", "abc", { maxMatrixCells }),
+      RangeError,
+    );
+  }
+});
+
 test("reconstructDiff rejects an unknown side", () => {
   assert.throws(
     () => reconstructDiff([{ type: "equal", text: "x" }], "middle"),

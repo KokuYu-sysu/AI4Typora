@@ -89,32 +89,25 @@ function tokenizeWithRanges(text, locale, ranges) {
 
 function rangesForAtomicValues(text, values = []) {
   const candidates = [...new Set(values)]
-    .filter((value) => typeof value === "string" && value.length > 0)
-    .sort((left, right) => right.length - left.length);
+    .filter((value) => typeof value === "string" && value.length > 0);
   const ranges = [];
-  let cursor = 0;
 
-  while (cursor < text.length && candidates.length > 0) {
-    let nextStart = -1;
-    let nextValue = "";
-    for (const value of candidates) {
-      const start = text.indexOf(value, cursor);
-      if (
-        start !== -1 &&
-        (nextStart === -1 ||
-          start < nextStart ||
-          (start === nextStart && value.length > nextValue.length))
-      ) {
-        nextStart = start;
-        nextValue = value;
-      }
+  for (const value of candidates) {
+    let start = text.indexOf(value);
+    while (start !== -1) {
+      ranges.push({ start, end: start + value.length });
+      start = text.indexOf(value, start + value.length);
     }
-    if (nextStart === -1) break;
-    ranges.push({ start: nextStart, end: nextStart + nextValue.length });
-    cursor = nextStart + nextValue.length;
   }
 
-  return ranges;
+  ranges.sort((left, right) => left.start - right.start || right.end - left.end);
+  const nonOverlapping = [];
+  for (const range of ranges) {
+    if (range.start >= (nonOverlapping.at(-1)?.end ?? 0)) {
+      nonOverlapping.push(range);
+    }
+  }
+  return nonOverlapping;
 }
 
 export function tokenizeForDiff(text, locale) {
