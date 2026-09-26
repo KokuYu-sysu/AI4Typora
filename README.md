@@ -2,6 +2,8 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+![Banner](asset/banner.png)
+
 `AI4Typora` is a Typora Community Plugin for AI-assisted writing on Windows. It brings rewriting, Q&A, and image Q&A into Typora without modifying Typora's installation files.
 
 This Windows port focuses on a stable writing workflow:
