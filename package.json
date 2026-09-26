@@ -1,12 +1,21 @@
 ﻿{
-  "name": "typora-plugin-ai-edit",
+  "name": "ai4typora",
   "version": "1.5.0",
   "type": "module",
-  "description": "Typing assistance plugin for Typora on Windows",
-  "author": "KokuYu & OpenAI",
+  "description": "Bilingual AI writing, rewriting, and image Q&A for Typora on Windows",
+  "author": "KokuYu",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KokuYu-sysu/AI4Typora.git"
+  },
+  "homepage": "https://github.com/KokuYu-sysu/AI4Typora#readme",
+  "bugs": {
+    "url": "https://github.com/KokuYu-sysu/AI4Typora/issues"
+  },
+  "license": "MIT",
   "main": "main.js",
   "scripts": {
-    "build": "echo AI Edit plugin does not require a build step",
+    "build": "echo AI4Typora plugin does not require a build step",
     "test": "node --test test/*.test.js"
   },
   "engines": {

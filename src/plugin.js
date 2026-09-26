@@ -1,16 +1,17 @@
-﻿const { Plugin, PluginSettings, Notice } = window[Symbol.for("typora-plugin-core@v2")];
+﻿const { Plugin, PluginSettings } = window[Symbol.for("typora-plugin-core@v2")];
 
 import { createAiRequest } from "./api.js";
 import { createChatPanel } from "./chat-panel.js";
 import { createChatService } from "./chat-service.js";
 import { createChatStore } from "./chat-store.js";
-import { DEFAULT_SETTINGS, mergeSettings, shortcutMatches } from "./config.js";
+import { DEFAULT_SETTINGS, formatShortcut, mergeSettings, shortcutMatches } from "./config.js";
 import { createDiffDialog } from "./diff-dialog.js";
 import { getCurrentDocumentIdentity } from "./document-identity.js";
 import { EditorSelectionController } from "./editor.js";
+import { translate } from "./i18n.js";
 import { getChatDataDirectory, prepareImageInputForModel } from "./platform.js";
 import { AiEditSettingTab } from "./settings-tab.js";
-import { ensureStyles, removeStyles, showToast, openContextMenu, closeContextMenu, promptForText, closeAnyDialog } from "./ui.js";
+import { ensureStyles, removeStyles, showToast, showShortcutGuide, closeShortcutGuide, openContextMenu, closeContextMenu, promptForText, closeAnyDialog } from "./ui.js";
 import { protectMath, restoreMathPreview, restoreMath } from "./math-protection.js";
 
 let unsavedRewriteSequence = 0;
@@ -86,20 +87,33 @@ export function prepareContextRewrite(selectedText, promptTemplate, documentText
   };
 }
 
-function snapshotValidationMessage(reason) {
+function snapshotValidationMessage(reason, language = "en") {
   if (reason === "document-changed") {
-    return "The active document changed. Replace is disabled.";
+    return translate(language, "optimize.documentChanged");
   }
   if (reason === "selection-changed") {
-    return "The original selection changed. Replace is disabled.";
+    return translate(language, "optimize.selectionChanged");
   }
   if (reason === "range-detached") {
-    return "The original selection is no longer available. Replace is disabled.";
+    return translate(language, "optimize.rangeDetached");
   }
   if (reason === "document-unsaved") {
-    return "Please save the document before replacing the selection.";
+    return translate(language, "optimize.documentUnsaved");
   }
-  return "The original selection could not be verified. Replace is disabled.";
+  return translate(language, "optimize.selectionUnverified");
+}
+
+function localizedMathError(error, language) {
+  const message = String(error || "");
+  for (const [prefix, key] of [
+    ["Unexpected or mutated math placeholder: ", "optimize.mathUnexpected"],
+    ["Duplicated math placeholder: ", "optimize.mathDuplicate"],
+    ["Missing math placeholder: ", "optimize.mathMissing"],
+    ["Protected placeholders are out of order near ", "optimize.mathOrder"],
+  ]) {
+    if (message.startsWith(prefix)) return translate(language, key, { token: message.slice(prefix.length) });
+  }
+  return message;
 }
 
 export async function runRewriteAttempt({
@@ -111,6 +125,7 @@ export async function runRewriteAttempt({
   onRequest,
   isCurrent = () => true,
   validateReplacement = () => ({ ok: true }),
+  language = "en",
 }) {
   previousRequest?.abort();
   dialog.beginGeneration();
@@ -143,7 +158,7 @@ export async function runRewriteAttempt({
       };
     }
     if (!String(result).trim()) {
-      dialog.fail("The model returned an empty response.");
+      dialog.fail(translate(language, "optimize.emptyResponse"));
       return { status: "failed", candidateText: "", replaceAllowed: false };
     }
 
@@ -156,8 +171,8 @@ export async function runRewriteAttempt({
     const validation = restored.ok ? validateReplacement() : { ok: false };
     const replaceAllowed = restored.ok && validation.ok;
     const validationMessage = restored.ok
-      ? (validation.ok ? "" : snapshotValidationMessage(validation.reason))
-      : restored.error;
+      ? (validation.ok ? "" : snapshotValidationMessage(validation.reason, language))
+      : localizedMathError(restored.error, language);
     dialog.complete({ candidateText, replaceAllowed, validationMessage });
     return { status: "complete", candidateText, replaceAllowed };
   } catch (error) {
@@ -168,7 +183,7 @@ export async function runRewriteAttempt({
         replaceAllowed: false,
       };
     }
-    dialog.fail(error?.message || "The request failed.");
+    dialog.fail(error?.uiKey ? translate(language, error.uiKey) : error?.message || translate(language, "optimize.requestFailed"));
     return {
       status: "failed",
       candidateText: restoreMathPreview(rawOutput, input.mathEntries),
@@ -219,17 +234,20 @@ export default class AiEditPlugin extends Plugin {
     this.registerSettingTab(new AiEditSettingTab(this));
     ensureStyles();
     let warning = "";
+    let warningDetail = "";
     try {
       this.chatStore = this.chatRuntime.createStore({ baseDir: this.chatRuntime.getDataDirectory() });
       await this.chatStore.initialize();
     } catch (error) {
-      warning = `Chat history is unavailable and will not persist: ${error?.message || error}`;
+      warningDetail = String(error?.message || error);
+      warning = this.tr("toast.historyUnavailable", { detail: warningDetail });
       this.chatStore = createVolatileChatStore();
       await this.chatStore.initialize();
       showToast(warning, "error");
     }
     this.chatService = this.chatRuntime.createService({
       store: this.chatStore,
+      getLanguage: () => this.getSettings().uiLanguage,
       resolveSettings: () => this.getSettings(),
       createRequest: (request) => this.chatRuntime.createRequest({
         ...request,
@@ -239,24 +257,26 @@ export default class AiEditPlugin extends Plugin {
     this.chatPanel = this.chatRuntime.createPanel({
       service: this.chatService,
       getDocumentIdentity: () => this.chatRuntime.getDocumentIdentity(),
+      getLanguage: () => this.getSettings().uiLanguage,
       warning,
+      getWarning: () => warningDetail ? this.tr("toast.historyUnavailable", { detail: warningDetail }) : "",
       onCopy: async (text) => {
         const copied = await this.copyTextToClipboard(text);
-        showToast(copied ? "Copied to clipboard." : "Copy failed. Please copy manually.", copied ? "success" : "error");
+        showToast(this.tr(copied ? "common.copied" : "toast.copyFailed"), copied ? "success" : "error");
         return copied;
       },
       onInsertAssistant: (text) => {
         const result = this.editorSelection.insertMarkdownAtLastCaret(text);
         if (result.ok) {
-          showToast("Inserted at the last editor caret.", "success");
+          showToast(this.tr("toast.inserted"), "success");
         } else {
           const reasons = {
-            "document-unsaved": "Save the document before inserting.",
-            "document-changed": "The document changed. Place the caret again and retry.",
-            "no-caret": "Place the caret in the editor and retry.",
-            "no-valid-caret": "The saved caret is no longer available. Place it again and retry.",
+            "document-unsaved": "toast.insertUnsaved",
+            "document-changed": "toast.insertChanged",
+            "no-caret": "toast.insertNoCaret",
+            "no-valid-caret": "toast.insertInvalidCaret",
           };
-          showToast(reasons[result.reason] || "Could not insert the response. Place the caret and retry.", "error");
+          showToast(this.tr(reasons[result.reason] || "toast.insertFailed"), "error");
         }
         return result;
       },
@@ -264,7 +284,7 @@ export default class AiEditPlugin extends Plugin {
     this.editorSelection.startCaretTracking(() => this.chatRuntime.getDocumentIdentity());
     document.addEventListener("contextmenu", this.handleContextMenu, true);
     document.addEventListener("keydown", this.handleKeyDown, true);
-    new Notice("AI Edit loaded. Shortcuts: Ctrl+E (Q&A), Ctrl+R (optimize), Ctrl+Shift+R (optimize with context).");
+    showShortcutGuide(formatShortcut(this.getSettings().shortcut), this.getSettings().uiLanguage);
   }
 
   onunload() {
@@ -275,6 +295,7 @@ export default class AiEditPlugin extends Plugin {
     this.editorSelection.stopCaretTracking();
     closeContextMenu();
     closeAnyDialog();
+    closeShortcutGuide();
     removeStyles();
     const disposing = this.chatService?.dispose?.();
     return Promise.resolve(disposing)
@@ -286,6 +307,18 @@ export default class AiEditPlugin extends Plugin {
     return this.chatRuntime.getDocumentIdentity();
   }
 
+  tr(key, params) {
+    return translate(this.getSettings().uiLanguage, key, params);
+  }
+
+  refreshLocalizedUi() {
+    const settings = this.getSettings();
+    if (document.querySelector("#ai-edit-shortcut-guide")) {
+      showShortcutGuide(formatShortcut(settings.shortcut), settings.uiLanguage);
+    }
+    if (this.chatPanel?.isOpen?.()) this.chatPanel.refreshLanguage();
+  }
+
   async resetOpenChatPanel() {
     if (this.chatPanel?.isOpen?.()) {
       await this.chatPanel.open({ mode: "text" });
@@ -294,7 +327,7 @@ export default class AiEditPlugin extends Plugin {
 
   async clearCurrentFileChatHistory(identity = this.getCurrentDocumentIdentity()) {
     if (!identity?.persistable) {
-      throw new Error("Save the Markdown document before clearing its chat history.");
+      throw new Error(this.tr("history.saveDocument"));
     }
     await this.chatService?.stop?.();
     await this.chatStore?.clearDocument(identity);
@@ -310,6 +343,7 @@ export default class AiEditPlugin extends Plugin {
   getSettings() {
     return mergeSettings({
       provider: this.settings.get("provider"),
+      uiLanguage: this.settings.get("uiLanguage"),
       model: this.settings.get("model"),
       oauthTokenPath: this.settings.get("oauthTokenPath"),
       oauthUserInfoPath: this.settings.get("oauthUserInfoPath"),
@@ -324,8 +358,10 @@ export default class AiEditPlugin extends Plugin {
   }
 
   saveSettings(patch) {
-    const next = mergeSettings({ ...this.getSettings(), ...patch });
+    const previous = this.getSettings();
+    const next = mergeSettings({ ...previous, ...patch });
     this.settings.set("provider", next.provider);
+    this.settings.set("uiLanguage", next.uiLanguage);
     this.settings.set("model", next.model);
     this.settings.set("oauthTokenPath", next.oauthTokenPath);
     this.settings.set("oauthUserInfoPath", next.oauthUserInfoPath);
@@ -336,6 +372,7 @@ export default class AiEditPlugin extends Plugin {
     this.settings.set("openaiCompat", next.openaiCompat);
     this.settings.set("shortcut", next.shortcut);
     this.settings.set("prompts", next.prompts);
+    if (previous.uiLanguage !== next.uiLanguage) this.refreshLocalizedUi();
   }
 
   handleContextMenu(event) {
@@ -368,13 +405,13 @@ export default class AiEditPlugin extends Plugin {
         y: event.clientY,
         items: [
           {
-            label: "AI Ask About Image",
-            description: "Ask questions about this image and auto-paste the copied answer at cursor.",
+            label: this.tr("menu.askImage"),
+            description: this.tr("menu.askImageDescription"),
             value: "image_qa",
           },
           {
-            label: "Open Typora Menu",
-            description: "Show Typora's original context menu for this image.",
+            label: this.tr("menu.native"),
+            description: this.tr("menu.nativeDescription"),
             value: "native_menu",
           },
         ],
@@ -389,48 +426,6 @@ export default class AiEditPlugin extends Plugin {
       });
       return;
     }
-
-    const selection = this.editorSelection.getSelectedText().trim();
-    if (!selection) {
-      return;
-    }
-
-    this.editorSelection.captureSelection();
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    openContextMenu({
-      x: event.clientX,
-      y: event.clientY,
-      items: [
-        {
-          label: "AI Optimize (Selection Only)",
-          description: "Only improve the selected text itself.",
-          value: "optimize",
-        },
-        {
-          label: "AI Optimize (Use Full Document Context)",
-          description: "Improve selection with full-document consistency.",
-          value: "optimize_with_context",
-        },
-        {
-          label: "AI Q&A",
-          description: "Ask a writing question and auto-paste the copied answer at cursor.",
-          value: "qa",
-        },
-      ],
-      onSelect: (value) => {
-        if (value === "optimize") {
-          this.openOptimizeFlow(false);
-        }
-        if (value === "optimize_with_context") {
-          this.openOptimizeFlow(true);
-        }
-        if (value === "qa") {
-          this.editorSelection.captureInsertionTarget();
-          this.openQaFlow();
-        }
-      },
-    });
   }
 
   handleKeyDown(event) {
@@ -442,6 +437,7 @@ export default class AiEditPlugin extends Plugin {
     if (shortcutMatches(event, settings.shortcut)) {
       event.preventDefault();
       event.stopPropagation();
+      this.editorSelection.captureCurrentCaret();
       this.editorSelection.captureInsertionTarget();
       this.openQaFlow();
       return;
@@ -550,32 +546,32 @@ export default class AiEditPlugin extends Plugin {
   }
 
   async openOptimizeFlow(withContext) {
-    const selectedText = this.editorSelection.getSavedText() || this.editorSelection.getSelectedText();
-    if (!selectedText.trim()) {
-      showToast("Please select text first.", "error");
-      return;
-    }
-
     const identity = getCurrentDocumentIdentity();
     const documentId = identity.persistable
       ? identity.key
       : `unsaved-rewrite-${++unsavedRewriteSequence}`;
     const snapshot = this.editorSelection.captureSelectionSnapshot(documentId);
-    if (!snapshot || snapshot.text !== selectedText) {
-      showToast("The selected text could not be captured safely. Please select it again.", "error");
+    if (!snapshot || !snapshot.text.trim()) {
+      const visibleText = this.editorSelection.getSavedText() || this.editorSelection.getSelectedText();
+      showToast(visibleText.trim()
+        ? this.tr("optimize.selectionCapture")
+        : this.tr("optimize.noSelection"), "error");
       return;
     }
+    const selectedText = snapshot.text;
 
     const settings = this.getSettings();
+    const language = settings.uiLanguage;
     const promptKey = withContext ? "optimize_with_context" : "optimize";
     const promptConfig = settings.prompts[promptKey];
     const documentText = withContext ? this.editorSelection.getDocumentText() : "";
 
     const extraPrompt = await promptForText({
-      title: withContext ? "AI Optimize With Context" : "AI Optimize Selection",
-      label: "Additional instructions (optional)",
-      placeholder: "For example: make the tone more formal; shorten it to 120 words.",
-      confirmText: "Start",
+      title: this.tr(withContext ? "optimize.context" : "optimize.selection"),
+      label: this.tr("optimize.instructions"),
+      placeholder: this.tr("optimize.placeholder"),
+      confirmText: this.tr("common.start"),
+      language,
     });
     if (extraPrompt === null) {
       return;
@@ -631,13 +627,15 @@ export default class AiEditPlugin extends Plugin {
         },
         isCurrent: () => !closed && generation === attemptGeneration,
         validateReplacement: validateTarget,
+        language,
       }).finally(() => {
         if (generation === attemptGeneration) activeRequest = null;
       });
     };
 
     dialog = createDiffDialog({
-      title: withContext ? "AI Optimize With Context" : "AI Optimize Selection",
+      title: this.tr(withContext ? "optimize.context" : "optimize.selection"),
+      language,
       originalText: selectedText,
       diffOptions: {
         atomicValues: input.mathEntries.map((entry) => entry.source),
@@ -663,12 +661,12 @@ export default class AiEditPlugin extends Plugin {
           dialog.complete({
             candidateText,
             replaceAllowed: false,
-            validationMessage: snapshotValidationMessage(result.reason),
+            validationMessage: snapshotValidationMessage(result.reason, language),
           });
           return;
         }
         dialog.close("replace");
-        showToast("Selection replaced.", "success");
+        showToast(this.tr("optimize.replaced"), "success");
       },
       onClose: () => {
         closed = true;
@@ -681,6 +679,7 @@ export default class AiEditPlugin extends Plugin {
   }
 
   async openQaFlow() {
+    this.editorSelection.captureCurrentCaret();
     return this.chatPanel?.open({ mode: "text" });
   }
 
@@ -692,7 +691,7 @@ export default class AiEditPlugin extends Plugin {
       || ""
     ).trim();
     if (!imageSource) {
-      showToast("Cannot read image source from the selected image.", "error");
+      showToast(this.tr("toast.imageSource"), "error");
       return;
     }
     return this.chatPanel?.open({ mode: "image", pendingImage: { source: imageSource } });

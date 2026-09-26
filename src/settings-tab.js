@@ -2,7 +2,6 @@ const { SettingTab, Notice } = window[Symbol.for("typora-plugin-core@v2")];
 
 import {
   CHATGPT_MODEL_PRESETS,
-  OPENAI_COMPAT_MODEL_PRESETS,
   formatShortcut,
 } from "./config.js";
 import {
@@ -13,8 +12,14 @@ import {
   loginOpenAiOauthInteractive,
 } from "./platform.js";
 import { confirmAction } from "./ui.js";
+import { translate } from "./i18n.js";
 
 const CUSTOM_MODEL_VALUE = "__custom__";
+const OAUTH_STATUS_KEYS = {
+  "OAuth token file format is not supported.": "settings.oauthUnsupported",
+  "No OAuth token found in the common Windows paths.": "settings.oauthMissing",
+  "OAuth token expired and no refresh token was found. Please login again.": "settings.oauthExpired",
+};
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -35,12 +40,12 @@ function getModelUiState(value, presets) {
   };
 }
 
-function createModelOptions(presets, selectedValue) {
+function createModelOptions(presets, selectedValue, customLabel) {
   const options = presets.map((preset) => {
     const selected = selectedValue === preset ? "selected" : "";
     return `<option value="${escapeHtml(preset)}" ${selected}>${escapeHtml(preset)}</option>`;
   });
-  options.push(`<option value="${CUSTOM_MODEL_VALUE}" ${selectedValue === CUSTOM_MODEL_VALUE ? "selected" : ""}>Custom...</option>`);
+  options.push(`<option value="${CUSTOM_MODEL_VALUE}" ${selectedValue === CUSTOM_MODEL_VALUE ? "selected" : ""}>${escapeHtml(customLabel)}</option>`);
   return options.join("");
 }
 
@@ -61,10 +66,17 @@ function readModelValue(container, selectId, inputId) {
   return presetValue.trim();
 }
 
+export function applyProviderVisibility(container, provider) {
+  container.querySelector("#ai-edit-chatgpt-settings").hidden = provider !== "chatgpt";
+  container.querySelector("#ai-edit-compatible-settings").hidden = provider !== "openai_compat";
+}
+
 export function bindChatHistoryControls(container, plugin, {
   confirm = confirmAction,
   notify = (message) => new Notice(message),
 } = {}) {
+  const language = plugin.getSettings?.().uiLanguage || "en";
+  const tr = (key, params) => translate(language, key, params);
   const current = container.querySelector("#ai-edit-clear-current-history");
   const all = container.querySelector("#ai-edit-clear-all-history");
   if (!current || !all) return;
@@ -74,34 +86,36 @@ export function bindChatHistoryControls(container, plugin, {
     const identity = plugin.getCurrentDocumentIdentity?.();
     if (!identity?.persistable) return;
     if (!await confirm({
-      title: "Clear current file history?",
-      message: "This permanently deletes all AI conversations for the current file.",
-      confirmText: "Clear history",
+      title: tr("history.currentTitle"),
+      message: tr("history.currentMessage"),
+      confirmText: tr("history.currentConfirm"),
+      language,
     })) return;
     const currentIdentity = plugin.getCurrentDocumentIdentity?.();
     if (!currentIdentity?.persistable || currentIdentity.key !== identity.key) {
-      notify("文件已切换，请重试");
+      notify(tr("history.fileChanged"));
       return;
     }
     try {
       await plugin.clearCurrentFileChatHistory(currentIdentity);
-      notify("Current file chat history cleared.");
+      notify(tr("history.currentCleared"));
     } catch (error) {
-      notify(`Could not clear current file history: ${error?.message || "Unknown error"}`);
+      notify(tr("history.currentFailed", { detail: error?.message || tr("settings.unknownError") }));
     }
   });
 
   all.addEventListener("click", async () => {
     if (!await confirm({
-      title: "Clear all chat history?",
-      message: "This permanently deletes AI conversations for every file.",
-      confirmText: "Clear all history",
+      title: tr("history.allTitle"),
+      message: tr("history.allMessage"),
+      confirmText: tr("history.allConfirm"),
+      language,
     })) return;
     try {
       await plugin.clearAllChatHistory();
-      notify("All chat history cleared.");
+      notify(tr("history.allCleared"));
     } catch (error) {
-      notify(`Could not clear all chat history: ${error?.message || "Unknown error"}`);
+      notify(tr("history.allFailed", { detail: error?.message || tr("settings.unknownError") }));
     }
   });
 }
@@ -122,10 +136,12 @@ export class AiEditSettingTab extends SettingTab {
 
   render() {
     const settings = this.plugin.getSettings();
+    const language = settings.uiLanguage || "en";
+    const tr = (key, params) => escapeHtml(translate(language, key, params));
+    const notice = (key, params) => new Notice(translate(language, key, params));
     const documentIdentity = this.plugin.getCurrentDocumentIdentity?.();
     const status = getOAuthStatus(settings);
     const chatgptModel = getModelUiState(settings.model, CHATGPT_MODEL_PRESETS);
-    const compatModel = getModelUiState(settings.openaiCompat.model, OPENAI_COMPAT_MODEL_PRESETS);
     const container = this.containerEl || this.contentEl || this.tabContentEl;
     if (container.empty) {
       container.empty();
@@ -135,164 +151,174 @@ export class AiEditSettingTab extends SettingTab {
 
     container.innerHTML = `
       <h2>AI Edit</h2>
-      <p class="ai-edit-setting-note">Shortcuts: Q&amp;A ${escapeHtml(formatShortcut(settings.shortcut))}, Optimize Selection Ctrl+R, Optimize With Context Ctrl+Shift+R, Result Confirm Ctrl+Enter, Result Copy+Close Ctrl+C.</p>
+      <p class="ai-edit-setting-note">${tr("settings.shortcuts", { chat: formatShortcut(settings.shortcut) })}</p>
       <div class="ai-edit-setting-grid">
         <div>
-          <label for="ai-edit-provider">Provider</label>
+          <label for="ai-edit-provider">${tr("settings.provider")}</label>
           <select id="ai-edit-provider">
-            <option value="chatgpt" ${settings.provider === "chatgpt" ? "selected" : ""}>ChatGPT OAuth Login</option>
-            <option value="openai_compat" ${settings.provider === "openai_compat" ? "selected" : ""}>OpenAI Compatible</option>
+            <option value="chatgpt" ${settings.provider === "chatgpt" ? "selected" : ""}>${tr("settings.chatgptLogin")}</option>
+            <option value="openai_compat" ${settings.provider === "openai_compat" ? "selected" : ""}>${tr("settings.compatible")}</option>
           </select>
         </div>
         <div>
-          <label for="ai-edit-model-preset">ChatGPT Model</label>
+          <label for="ai-edit-ui-language">${tr("settings.language")}</label>
+          <select id="ai-edit-ui-language">
+            <option value="zh-CN" ${language === "zh-CN" ? "selected" : ""}>简体中文</option>
+            <option value="en" ${language === "en" ? "selected" : ""}>English</option>
+          </select>
+        </div>
+        <div id="ai-edit-chatgpt-settings">
+        <div>
+          <label for="ai-edit-model-preset">${tr("settings.chatgptModel")}</label>
           <select id="ai-edit-model-preset">
-            ${createModelOptions(CHATGPT_MODEL_PRESETS, chatgptModel.preset)}
+            ${createModelOptions(CHATGPT_MODEL_PRESETS, chatgptModel.preset, tr("settings.custom"))}
           </select>
-          <input id="ai-edit-model-custom" type="text" placeholder="Type model id" value="${escapeHtml(chatgptModel.custom)}" style="margin-top: 6px; ${chatgptModel.preset === CUSTOM_MODEL_VALUE ? "" : "display: none;"}" />
+          <input id="ai-edit-model-custom" type="text" placeholder="${tr("settings.typeModel")}" value="${escapeHtml(chatgptModel.custom)}" style="margin-top: 6px; ${chatgptModel.preset === CUSTOM_MODEL_VALUE ? "" : "display: none;"}" />
         </div>
         <div>
-          <label for="ai-edit-oauth-path">OAuth Token File Path</label>
+          <label for="ai-edit-oauth-path">${tr("settings.tokenPath")}</label>
           <input id="ai-edit-oauth-path" type="text" value="${escapeHtml(settings.oauthTokenPath || "")}" />
-          <label for="ai-edit-oauth-user-path" style="margin-top: 6px;">OAuth User Info Path</label>
+          <label for="ai-edit-oauth-user-path" style="margin-top: 6px;">${tr("settings.userPath")}</label>
           <input id="ai-edit-oauth-user-path" type="text" value="${escapeHtml(settings.oauthUserInfoPath || "")}" />
-          <div class="ai-edit-setting-note">Auto-detect order: %APPDATA%/oauth-cli-kit/auth/codex.json, %LOCALAPPDATA%/oauth-cli-kit/auth/codex.json, %USERPROFILE%/.codex/auth.json</div>
-          <div class="ai-edit-setting-note">OAuth Login runs an OpenAI PKCE flow (oauth-cli-kit compatible).</div>
-          <div class="ai-edit-setting-status ${status.ok ? "ok" : "bad"}">${escapeHtml(status.ok ? `Connected (${status.sourcePath})` : status.message)}</div>
+          <div class="ai-edit-setting-note">${tr("settings.autoDetect")}</div>
+          <div class="ai-edit-setting-note">${tr("settings.oauthFlow")}</div>
+          <div class="ai-edit-setting-status ${status.ok ? "ok" : "bad"}">${status.ok ? tr("settings.connected", { path: status.sourcePath }) : tr(OAUTH_STATUS_KEYS[status.message] || "settings.oauthStatusUnknown", { detail: status.message })}</div>
           <div style="margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;">
-            <button class="ai-edit-btn secondary" id="ai-edit-oauth-login">OAuth Login</button>
-            <button class="ai-edit-btn secondary" id="ai-edit-oauth-download">Download User Info</button>
-            <button class="ai-edit-btn secondary" id="ai-edit-oauth-refresh">Refresh OAuth Status</button>
+            <button class="ai-edit-btn secondary" id="ai-edit-oauth-login">${tr("settings.oauthLogin")}</button>
+            <button class="ai-edit-btn secondary" id="ai-edit-oauth-download">${tr("settings.downloadUser")}</button>
+            <button class="ai-edit-btn secondary" id="ai-edit-oauth-refresh">${tr("settings.refreshStatus")}</button>
           </div>
         </div>
+        </div>
         <div>
-          <label for="ai-edit-prompt-export-path">Setting JSON File with Prompts Path</label>
+          <label for="ai-edit-prompt-export-path">${tr("settings.promptPath")}</label>
           <input id="ai-edit-prompt-export-path" type="text" value="${escapeHtml(settings.promptExportPath || "")}" />
-          <div class="ai-edit-setting-note">Export or import Prompts JSON.</div>
+          <div class="ai-edit-setting-note">${tr("settings.promptNote")}</div>
           <div style="margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;">
-            <button class="ai-edit-btn secondary" id="ai-edit-export-prompts">Output Setting</button>
-            <button class="ai-edit-btn secondary" id="ai-edit-import-prompts">Import Setting</button>
+            <button class="ai-edit-btn secondary" id="ai-edit-export-prompts">${tr("settings.export")}</button>
+            <button class="ai-edit-btn secondary" id="ai-edit-import-prompts">${tr("settings.import")}</button>
           </div>
         </div>
+        <div id="ai-edit-compatible-settings">
         <div>
-          <label for="ai-edit-compat-url">OpenAI Compatible Base URL</label>
+          <label for="ai-edit-compat-url">${tr("settings.compatUrl")}</label>
           <input id="ai-edit-compat-url" type="text" value="${escapeHtml(settings.openaiCompat.baseUrl || "")}" />
         </div>
         <div>
-          <label for="ai-edit-compat-key">OpenAI Compatible API Key</label>
+          <label for="ai-edit-compat-key">${tr("settings.compatKey")}</label>
           <input id="ai-edit-compat-key" type="password" value="${escapeHtml(settings.openaiCompat.apiKey || "")}" />
         </div>
         <div>
-          <label for="ai-edit-compat-model-preset">OpenAI Compatible Model</label>
-          <select id="ai-edit-compat-model-preset">
-            ${createModelOptions(OPENAI_COMPAT_MODEL_PRESETS, compatModel.preset)}
-          </select>
-          <input id="ai-edit-compat-model-custom" type="text" placeholder="Type model id" value="${escapeHtml(compatModel.custom)}" style="margin-top: 6px; ${compatModel.preset === CUSTOM_MODEL_VALUE ? "" : "display: none;"}" />
+          <label for="ai-edit-compat-model">${tr("settings.compatModel")}</label>
+          <input id="ai-edit-compat-model" type="text" placeholder="${tr("settings.exactModel")}" value="${escapeHtml(settings.openaiCompat.model || "")}" />
+          <div class="ai-edit-setting-note">${tr("settings.modelNote")}</div>
         </div>
-        <div class="ai-edit-setting-card">
-          <div class="ai-edit-setting-card-title">OpenAI Compatible Failover</div>
+        <details id="ai-edit-compatible-advanced" class="ai-edit-setting-card">
+          <summary>${tr("settings.advanced")}</summary>
           <div class="ai-edit-toggle-row">
-            <div class="ai-edit-toggle-row-text">Enable automatic fallback to backup API connections</div>
+            <div class="ai-edit-toggle-row-text">${tr("settings.enableFailover")}</div>
             <label class="ai-edit-toggle-control" for="ai-edit-compat-failover-enabled">
               <input id="ai-edit-compat-failover-enabled" type="checkbox" ${settings.openaiCompatFailoverEnabled ? "checked" : ""} />
-              Enabled
+              ${tr("settings.enabled")}
             </label>
           </div>
           <div style="margin-top: 8px;">
-            <label for="ai-edit-compat-preferred-connection">Active OpenAI-Compatible Connection</label>
+            <label for="ai-edit-compat-preferred-connection">${tr("settings.activeConnection")}</label>
             <select id="ai-edit-compat-preferred-connection">
-              <option value="primary" ${settings.openaiCompatPreferredConnection === "primary" ? "selected" : ""}>Primary API</option>
-              <option value="backup_1" ${settings.openaiCompatPreferredConnection === "backup_1" ? "selected" : ""}>Backup API 1</option>
-              <option value="backup_2" ${settings.openaiCompatPreferredConnection === "backup_2" ? "selected" : ""}>Backup API 2</option>
+              <option value="primary" ${settings.openaiCompatPreferredConnection === "primary" ? "selected" : ""}>${tr("settings.primary")}</option>
+              <option value="backup_1" ${settings.openaiCompatPreferredConnection === "backup_1" ? "selected" : ""}>${tr("settings.backup1")}</option>
+              <option value="backup_2" ${settings.openaiCompatPreferredConnection === "backup_2" ? "selected" : ""}>${tr("settings.backup2")}</option>
             </select>
-            <div class="ai-edit-setting-card-note">Set this to Backup API 1/2 to directly use other AI models during normal use.</div>
+            <div class="ai-edit-setting-card-note">${tr("settings.connectionNote")}</div>
           </div>
           <div class="ai-edit-setting-subgrid">
             <div>
-              <label for="ai-edit-compat-backup1-url">Backup API 1 Base URL</label>
+              <label for="ai-edit-compat-backup1-url">${tr("settings.backup1Url")}</label>
               <input id="ai-edit-compat-backup1-url" type="text" value="${escapeHtml(settings.openaiCompatBackups?.[0]?.baseUrl || "")}" />
             </div>
             <div>
-              <label for="ai-edit-compat-backup1-key">Backup API 1 API Key</label>
+              <label for="ai-edit-compat-backup1-key">${tr("settings.backup1Key")}</label>
               <input id="ai-edit-compat-backup1-key" type="password" value="${escapeHtml(settings.openaiCompatBackups?.[0]?.apiKey || "")}" />
             </div>
             <div>
-              <label for="ai-edit-compat-backup1-model">Backup API 1 Model</label>
-              <input id="ai-edit-compat-backup1-model" type="text" value="${escapeHtml(settings.openaiCompatBackups?.[0]?.model || "")}" placeholder="Optional, fallback to ChatGPT model when empty" />
+              <label for="ai-edit-compat-backup1-model">${tr("settings.backup1Model")}</label>
+              <input id="ai-edit-compat-backup1-model" type="text" value="${escapeHtml(settings.openaiCompatBackups?.[0]?.model || "")}" placeholder="${tr("settings.optionalModel")}" />
             </div>
             <div>
-              <label for="ai-edit-compat-backup2-url">Backup API 2 Base URL</label>
+              <label for="ai-edit-compat-backup2-url">${tr("settings.backup2Url")}</label>
               <input id="ai-edit-compat-backup2-url" type="text" value="${escapeHtml(settings.openaiCompatBackups?.[1]?.baseUrl || "")}" />
             </div>
             <div>
-              <label for="ai-edit-compat-backup2-key">Backup API 2 API Key</label>
+              <label for="ai-edit-compat-backup2-key">${tr("settings.backup2Key")}</label>
               <input id="ai-edit-compat-backup2-key" type="password" value="${escapeHtml(settings.openaiCompatBackups?.[1]?.apiKey || "")}" />
             </div>
             <div>
-              <label for="ai-edit-compat-backup2-model">Backup API 2 Model</label>
-              <input id="ai-edit-compat-backup2-model" type="text" value="${escapeHtml(settings.openaiCompatBackups?.[1]?.model || "")}" placeholder="Optional, fallback to ChatGPT model when empty" />
+              <label for="ai-edit-compat-backup2-model">${tr("settings.backup2Model")}</label>
+              <input id="ai-edit-compat-backup2-model" type="text" value="${escapeHtml(settings.openaiCompatBackups?.[1]?.model || "")}" placeholder="${tr("settings.optionalModel")}" />
             </div>
           </div>
+        </details>
         </div>
         <div>
-          <label for="ai-edit-optimize-system">Optimize System Prompt</label>
+          <label for="ai-edit-optimize-system">${tr("settings.optimizeSystem")}</label>
           <textarea id="ai-edit-optimize-system" rows="3">${escapeHtml(settings.prompts.optimize.system)}</textarea>
         </div>
         <div>
-          <label for="ai-edit-optimize-user">Optimize User Prompt</label>
+          <label for="ai-edit-optimize-user">${tr("settings.optimizeUser")}</label>
           <textarea id="ai-edit-optimize-user" rows="4">${escapeHtml(settings.prompts.optimize.user)}</textarea>
         </div>
         <div>
-          <label for="ai-edit-context-system">Context Optimize System Prompt</label>
+          <label for="ai-edit-context-system">${tr("settings.contextSystem")}</label>
           <textarea id="ai-edit-context-system" rows="3">${escapeHtml(settings.prompts.optimize_with_context.system)}</textarea>
         </div>
         <div>
-          <label for="ai-edit-context-user">Context Optimize User Prompt</label>
+          <label for="ai-edit-context-user">${tr("settings.contextUser")}</label>
           <textarea id="ai-edit-context-user" rows="4">${escapeHtml(settings.prompts.optimize_with_context.user)}</textarea>
         </div>
         <div>
-          <label for="ai-edit-qa-system">Q&amp;A System Prompt</label>
+          <label for="ai-edit-qa-system">${tr("settings.qaSystem")}</label>
           <textarea id="ai-edit-qa-system" rows="3">${escapeHtml(settings.prompts.qa.system)}</textarea>
         </div>
         <div>
-          <label for="ai-edit-qa-user">Q&amp;A User Prompt</label>
+          <label for="ai-edit-qa-user">${tr("settings.qaUser")}</label>
           <textarea id="ai-edit-qa-user" rows="2">${escapeHtml(settings.prompts.qa.user)}</textarea>
         </div>
         <div>
-          <label for="ai-edit-qa-context-system">Q&amp;A With Context System Prompt</label>
+          <label for="ai-edit-qa-context-system">${tr("settings.qaContextSystem")}</label>
           <textarea id="ai-edit-qa-context-system" rows="3">${escapeHtml(settings.prompts.qa_with_context.system)}</textarea>
         </div>
         <div>
-          <label for="ai-edit-qa-context-user">Q&amp;A With Context User Prompt</label>
+          <label for="ai-edit-qa-context-user">${tr("settings.qaContextUser")}</label>
           <textarea id="ai-edit-qa-context-user" rows="4">${escapeHtml(settings.prompts.qa_with_context.user)}</textarea>
         </div>
         <div>
-          <label for="ai-edit-image-qa-system">Image Q&amp;A System Prompt</label>
+          <label for="ai-edit-image-qa-system">${tr("settings.imageQaSystem")}</label>
           <textarea id="ai-edit-image-qa-system" rows="3">${escapeHtml(settings.prompts.image_qa.system)}</textarea>
         </div>
         <div>
-          <label for="ai-edit-image-qa-user">Image Q&amp;A User Prompt</label>
+          <label for="ai-edit-image-qa-user">${tr("settings.imageQaUser")}</label>
           <textarea id="ai-edit-image-qa-user" rows="3">${escapeHtml(settings.prompts.image_qa.user)}</textarea>
         </div>
         <div class="ai-edit-setting-card">
-          <div class="ai-edit-setting-card-title">Chat History</div>
-          <div class="ai-edit-setting-card-note">Clearing history is permanent and does not change your AI settings.</div>
+          <div class="ai-edit-setting-card-title">${tr("settings.history")}</div>
+          <div class="ai-edit-setting-card-note">${tr("settings.historyNote")}</div>
           <div style="margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;">
-            <button class="ai-edit-btn danger" id="ai-edit-clear-current-history" ${documentIdentity?.persistable ? "" : "disabled"}>Clear Current File History</button>
-            <button class="ai-edit-btn danger" id="ai-edit-clear-all-history">Clear All Chat History</button>
+            <button class="ai-edit-btn danger" id="ai-edit-clear-current-history" ${documentIdentity?.persistable ? "" : "disabled"}>${tr("settings.clearCurrent")}</button>
+            <button class="ai-edit-btn danger" id="ai-edit-clear-all-history">${tr("settings.clearAll")}</button>
           </div>
         </div>
       </div>
       <div style="margin-top: 14px; display: flex; gap: 10px;">
-        <button class="ai-edit-btn primary" id="ai-edit-save-settings">Save</button>
+        <button class="ai-edit-btn primary" id="ai-edit-save-settings">${tr("common.save")}</button>
       </div>
     `;
 
+    applyProviderVisibility(container, settings.provider);
+    container.querySelector("#ai-edit-provider").addEventListener("change", (event) => {
+      applyProviderVisibility(container, event.target.value);
+    });
     container.querySelector("#ai-edit-model-preset").addEventListener("change", () => {
       toggleCustomModelInput(container, "ai-edit-model-preset", "ai-edit-model-custom");
-    });
-    container.querySelector("#ai-edit-compat-model-preset").addEventListener("change", () => {
-      toggleCustomModelInput(container, "ai-edit-compat-model-preset", "ai-edit-compat-model-custom");
     });
     bindChatHistoryControls(container, this.plugin);
 
@@ -304,7 +330,7 @@ export class AiEditSettingTab extends SettingTab {
         oauthUserInfoPath,
       });
 
-      new Notice("Starting OpenAI OAuth login in browser...");
+      notice("settings.oauthStarting");
       try {
         const result = await loginOpenAiOauthInteractive(this.plugin.getSettings());
         this.plugin.saveSettings({
@@ -312,15 +338,15 @@ export class AiEditSettingTab extends SettingTab {
           oauthUserInfoPath,
         });
         this.render();
-        new Notice(`OAuth login successful. Token saved to: ${result.tokenPath}`);
+        notice("settings.oauthSuccess", { path: result.tokenPath });
       } catch (error) {
-        new Notice(`OAuth login failed: ${error?.message || "Unknown error"}`);
+        notice("settings.oauthFailed", { detail: error?.message || translate(language, "settings.unknownError") });
       }
     });
 
     container.querySelector("#ai-edit-oauth-refresh").addEventListener("click", () => {
       this.render();
-      new Notice("OAuth status refreshed.");
+      notice("settings.oauthRefreshed");
     });
 
     container.querySelector("#ai-edit-oauth-download").addEventListener("click", async () => {
@@ -339,9 +365,9 @@ export class AiEditSettingTab extends SettingTab {
           oauthUserInfoPath,
         });
         this.render();
-        new Notice(`OAuth user info saved: ${outputPath}`);
+        notice("settings.userSaved", { path: outputPath });
       } catch (error) {
-        new Notice(`Download failed: ${error?.message || "Unknown error"}`);
+        notice("settings.downloadFailed", { detail: error?.message || translate(language, "settings.unknownError") });
       }
     });
 
@@ -358,9 +384,9 @@ export class AiEditSettingTab extends SettingTab {
           promptExportPath: promptExportPath || outputPath,
         });
         this.render();
-        new Notice(`Output setting file saved: ${outputPath}`);
+        notice("settings.exportSaved", { path: outputPath });
       } catch (error) {
-        new Notice(`Output setting failed: ${error?.message || "Unknown error"}`);
+        notice("settings.exportFailed", { detail: error?.message || translate(language, "settings.unknownError") });
       }
     });
 
@@ -377,35 +403,37 @@ export class AiEditSettingTab extends SettingTab {
           prompts: imported.prompts,
         });
         this.render();
-        new Notice(`Imported prompts from: ${imported.inputPath}`);
+        notice("settings.imported", { path: imported.inputPath });
       } catch (error) {
-        new Notice(`Import setting failed: ${error?.message || "Unknown error"}`);
+        notice("settings.importFailed", { detail: error?.message || translate(language, "settings.unknownError") });
       }
     });
 
     container.querySelector("#ai-edit-save-settings").addEventListener("click", () => {
       const provider = container.querySelector("#ai-edit-provider").value;
+      const selectedLanguage = container.querySelector("#ai-edit-ui-language").value;
       const model = readModelValue(container, "ai-edit-model-preset", "ai-edit-model-custom");
-      const compatModelValue = readModelValue(container, "ai-edit-compat-model-preset", "ai-edit-compat-model-custom");
+      const compatModelValue = container.querySelector("#ai-edit-compat-model").value.trim();
       if (provider === "chatgpt" && !model) {
-        new Notice("ChatGPT model cannot be empty.");
+        notice("settings.modelRequired");
         return;
       }
       if (provider === "openai_compat" && !compatModelValue) {
-        new Notice("OpenAI compatible model cannot be empty.");
+        notice("settings.compatModelRequired");
         return;
       }
 
       this.plugin.saveSettings({
         provider,
-        model: model || settings.model || CHATGPT_MODEL_PRESETS[0],
+        uiLanguage: selectedLanguage,
+        model,
         oauthTokenPath: container.querySelector("#ai-edit-oauth-path").value.trim(),
         oauthUserInfoPath: container.querySelector("#ai-edit-oauth-user-path").value.trim(),
         promptExportPath: container.querySelector("#ai-edit-prompt-export-path").value.trim(),
         openaiCompat: {
           baseUrl: container.querySelector("#ai-edit-compat-url").value.trim(),
           apiKey: container.querySelector("#ai-edit-compat-key").value.trim(),
-          model: compatModelValue || settings.openaiCompat.model || OPENAI_COMPAT_MODEL_PRESETS[0],
+          model: compatModelValue,
         },
         openaiCompatFailoverEnabled: !!container.querySelector("#ai-edit-compat-failover-enabled").checked,
         openaiCompatPreferredConnection: container.querySelector("#ai-edit-compat-preferred-connection").value,
@@ -447,7 +475,7 @@ export class AiEditSettingTab extends SettingTab {
         },
       });
       this.render();
-      new Notice("AI Edit settings saved.");
+      new Notice(translate(selectedLanguage, "settings.saved"));
     });
   }
 }

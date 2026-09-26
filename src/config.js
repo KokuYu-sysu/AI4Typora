@@ -1,6 +1,8 @@
-﻿const localeIsChinese = typeof navigator !== "undefined" && /^zh/i.test(
-  (navigator.language || (navigator.languages && navigator.languages[0]) || "en")
-);
+﻿import { isChineseLocale, withTyporaFormatRules } from "./typora-format.js";
+
+import { detectUiLanguage, normalizeUiLanguage } from "./i18n.js";
+
+const localeIsChinese = isChineseLocale();
 
 export const CHATGPT_MODEL_PRESETS = [
   "gpt-5.4",
@@ -8,13 +10,6 @@ export const CHATGPT_MODEL_PRESETS = [
   "gpt-5",
   "gpt-5-mini",
   "o4-mini",
-];
-
-export const OPENAI_COMPAT_MODEL_PRESETS = [
-  "gpt-5.4-mini",
-  "gpt-5.4",
-  "gpt-4.1",
-  "gpt-4o-mini",
 ];
 
 function normalizeCompatBackups(rawBackups) {
@@ -29,9 +24,16 @@ function normalizeCompatBackups(rawBackups) {
   }));
 }
 
+function withDefaultTyporaRules(prompts, isChinese) {
+  return Object.fromEntries(Object.entries(prompts).map(([mode, prompt]) => [
+    mode,
+    { ...prompt, system: withTyporaFormatRules(prompt.system, isChinese) },
+  ]));
+}
+
 export function createDefaultPrompts(isChinese = localeIsChinese) {
   if (isChinese) {
-    return {
+    return withDefaultTyporaRules({
       optimize: {
         system: "你是一位资深语言学专家和专业编辑，精通语法、语义、语用与语域、术语一致性及跨语言表达。请在不改变作者原意或事实主张的前提下优化文字。仅返回修订后的正文。",
         user: "请优化下面这段文字。保留原意，提升表达质量。只返回优化后的正文，不要解释。\n\n{selection}",
@@ -52,10 +54,10 @@ export function createDefaultPrompts(isChinese = localeIsChinese) {
         system: "你是一位资深语言学专家和专业编辑，精通语法、语义、语用与语域、术语一致性及跨语言表达。请基于图像内容直接、准确地回答问题；若信息不足请明确说明。",
         user: "请根据这张图片回答问题。只输出答案正文，不要添加多余说明。\n\n问题：{question}",
       },
-    };
+    }, isChinese);
   }
 
-  return {
+  return withDefaultTyporaRules({
     optimize: {
         system: "You are a senior linguistics expert and professional editor with expertise in grammar, semantics, pragmatics and register, terminology consistency, and cross-language expression. Improve the text without changing the author's meaning or factual claims. Return only the revised text.",
         user: "Please improve the following text. Keep the original meaning and return only the revised passage.\n\n{selection}",
@@ -76,11 +78,12 @@ export function createDefaultPrompts(isChinese = localeIsChinese) {
         system: "You are a senior linguistics expert and professional editor with expertise in grammar, semantics, pragmatics and register, terminology consistency, and cross-language expression. Answer accurately based on the image and clearly state uncertainty when needed.",
         user: "Answer the question based on this image. Return only the answer text.\n\nQuestion: {question}",
       },
-  };
+  }, isChinese);
 }
 
 export const DEFAULT_SETTINGS = {
   provider: "chatgpt",
+  uiLanguage: detectUiLanguage(),
   model: "gpt-5.4",
   oauthTokenPath: "",
   oauthUserInfoPath: "",
@@ -113,6 +116,7 @@ export function mergeSettings(raw = {}) {
   return {
     ...DEFAULT_SETTINGS,
     ...raw,
+    uiLanguage: normalizeUiLanguage(raw.uiLanguage),
     openaiCompat: {
       ...DEFAULT_SETTINGS.openaiCompat,
       ...(raw.openaiCompat || {}),

@@ -1,4 +1,5 @@
-import { ensureStyles } from "./ui.js";
+import { ensureStyles, promptForText } from "./ui.js";
+import { translate } from "./i18n.js";
 
 const MIN_WIDTH = 360;
 const MAX_WIDTH = 720;
@@ -15,7 +16,7 @@ function findAction(target) {
 }
 
 /** A deliberately plain-text, non-modal view of one ChatService. */
-export function createChatPanel({ service, getDocumentIdentity, onInsertAssistant, onCopy, warning = "" } = {}) {
+export function createChatPanel({ service, getDocumentIdentity, getLanguage = () => "en", onInsertAssistant, onCopy, promptForSessionTitle = promptForText, warning = "", getWarning } = {}) {
   if (!service || typeof getDocumentIdentity !== "function") throw new Error("Chat panel requires a chat service and document identity lookup.");
   let root = null;
   let unsubscribe = null;
@@ -28,10 +29,11 @@ export function createChatPanel({ service, getDocumentIdentity, onInsertAssistan
   let railCollapsed = false;
 
   const currentIdentity = () => getDocumentIdentity();
+  const tr = (key) => translate(getLanguage(), key);
   const isOpen = () => Boolean(root?.parentNode);
   const showError = (error) => {
     const message = root?.querySelector?.(".ai-edit-chat-error");
-    if (message) message.textContent = String(error?.message || error || "The chat action failed.");
+    if (message) message.textContent = String(error?.message || error || tr("chat.actionFailed"));
   };
   const safely = (work) => Promise.resolve().then(work).catch(showError);
 
@@ -90,6 +92,7 @@ export function createChatPanel({ service, getDocumentIdentity, onInsertAssistan
     const rail = root.querySelector(".ai-edit-chat-rail");
     const sessions = root.querySelector(".ai-edit-chat-sessions");
     const messages = root.querySelector(".ai-edit-chat-messages");
+    const pending = root.querySelector(".ai-edit-chat-attachments");
     const input = root.querySelector(".ai-edit-chat-input");
     const error = root.querySelector(".ai-edit-chat-error");
     rail.classList?.toggle?.("collapsed", railCollapsed);
@@ -97,36 +100,45 @@ export function createChatPanel({ service, getDocumentIdentity, onInsertAssistan
     for (const session of state.sessions || []) {
       const row = element("div", `ai-edit-chat-session${session.id === state.activeSession?.id ? " active" : ""}`);
       row.dataset.sessionId = session.id;
-      const title = element("button", "ai-edit-chat-session-title", session.title || "New chat");
+      const title = element("button", "ai-edit-chat-session-title", session.title || tr("chat.newTitle"));
       title.type = "button";
       title.dataset.action = "select";
       title.dataset.sessionId = session.id;
       row.appendChild(title);
       const controls = element("span", "ai-edit-chat-session-actions");
-      addButton(controls, "rename", "Rename", { sessionId: session.id });
-      addButton(controls, "delete", "Delete", { sessionId: session.id });
+      addButton(controls, "rename", tr("chat.rename"), { sessionId: session.id });
+      addButton(controls, "delete", tr("chat.delete"), { sessionId: session.id });
       row.appendChild(controls);
       sessions.appendChild(row);
     }
     messages.replaceChildren();
+    pending.replaceChildren();
+    if (state.pendingImage) {
+      const chip = element("div", "ai-edit-chat-pending-image", tr("chat.pendingImage"));
+      const remove = addButton(chip, "remove-image", "×");
+      remove.setAttribute("aria-label", tr("chat.removeImage"));
+      pending.appendChild(chip);
+    }
     for (const message of state.activeSession?.messages || []) {
       const card = element("article", `ai-edit-chat-message ${message.role} ${message.status || "complete"}`);
       card.dataset.messageId = message.id;
-      card.appendChild(element("div", "ai-edit-chat-role", message.role === "assistant" ? "AI" : "You"));
-      card.appendChild(element("pre", "ai-edit-chat-content", message.content || (message.status === "streaming" ? "Thinking…" : "")));
+      card.appendChild(element("div", "ai-edit-chat-role", message.role === "assistant" ? "AI" : tr("chat.you")));
+      if (message.role === "user" && message.image) card.appendChild(element("span", "ai-edit-chat-image-marker", tr("chat.imageAttached")));
+      card.appendChild(element("pre", "ai-edit-chat-content", message.content || (message.status === "streaming" ? tr("chat.thinking") : "")));
       if (message.role === "assistant" && (message.status === "complete" || message.status === "stopped")) {
         const actions = element("div", "ai-edit-chat-message-actions");
-        addButton(actions, "copy", "Copy", { messageId: message.id });
-        addButton(actions, "insert", "Insert", { messageId: message.id });
+        addButton(actions, "copy", tr("common.copy"), { messageId: message.id });
+        addButton(actions, "insert", tr("common.insert"), { messageId: message.id });
         card.appendChild(actions);
       }
       messages.appendChild(card);
     }
     const streaming = state.requestStatus === "streaming";
-    input.disabled = streaming;
-    root.querySelector("[data-action='send']").disabled = streaming;
+    const busy = streaming || state.requestStatus === "sending";
+    input.disabled = busy;
+    root.querySelector("[data-action='send']").disabled = busy;
     root.querySelector("[data-action='stop']").hidden = !streaming;
-    error.textContent = [warning, state.error].filter(Boolean).join(" ");
+    error.textContent = [getWarning ? getWarning() : warning, state.errorDetail, state.errorKey ? tr(state.errorKey) : state.error].filter(Boolean).join(" ");
   }
 
   function messageById(id) {
@@ -138,9 +150,11 @@ export function createChatPanel({ service, getDocumentIdentity, onInsertAssistan
     if (name === "close") return close();
     if (name === "rail") { railCollapsed = !railCollapsed; render(); return; }
     if (name === "stop") return service.stop();
+    if (name === "remove-image") return forCurrentDocument(() => service.removePendingImage());
     if (name === "send") {
       const input = root.querySelector(".ai-edit-chat-input");
       return forCurrentDocument(async () => {
+        if (service.getState().requestStatus !== "idle") return;
         const text = input.value.trim();
         if (!text) return;
         input.value = "";
@@ -154,8 +168,14 @@ export function createChatPanel({ service, getDocumentIdentity, onInsertAssistan
         if (action.dataset.sessionId !== service.getState().activeSession?.id) await service.openSession(identity, action.dataset.sessionId);
         if (!matchesDocument(identity)) return;
         const active = service.getState().activeSession;
-        const title = globalThis.window?.prompt?.("Rename conversation", active?.title || "") ?? "";
-        if (title.trim()) await service.renameActive(title);
+        const title = await promptForSessionTitle({
+          title: tr("chat.renameTitle"),
+          label: tr("chat.sessionTitle"),
+          initialValue: active?.title || "",
+          confirmText: tr("chat.rename"),
+          language: getLanguage(),
+        });
+        if (title?.trim() && matchesDocument(identity)) await service.renameActive(title.trim());
       });
     }
     if (name === "delete") {
@@ -209,19 +229,20 @@ export function createChatPanel({ service, getDocumentIdentity, onInsertAssistan
     ensureStyles();
     root = element("aside", "ai-edit-chat-panel");
     root.setAttribute("role", "complementary");
-    root.setAttribute("aria-label", "AI conversation");
+    root.setAttribute("aria-label", tr("chat.title"));
     const resize = element("div", "ai-edit-chat-resize");
     const rail = element("nav", "ai-edit-chat-rail");
     const railHeader = element("div", "ai-edit-chat-rail-header");
-    addButton(railHeader, "new", "New"); addButton(railHeader, "rail", "Hide");
+    addButton(railHeader, "new", tr("chat.new")); addButton(railHeader, "rail", tr("chat.hide"));
     rail.appendChild(railHeader); rail.appendChild(element("div", "ai-edit-chat-sessions"));
     const main = element("section", "ai-edit-chat-main");
-    const header = element("header", "ai-edit-chat-header", "AI conversation"); addButton(header, "rail", "History");
-    const closeButton = addButton(header, "close", "×"); closeButton.className = "ai-edit-dialog-close"; closeButton.setAttribute("aria-label", "Close conversation");
+    const header = element("div", "ai-edit-chat-header"); header.appendChild(element("span", "ai-edit-chat-title", tr("chat.title"))); addButton(header, "rail", tr("chat.history"));
+    const closeButton = addButton(header, "close", "×"); closeButton.className = "ai-edit-dialog-close"; closeButton.setAttribute("aria-label", tr("chat.close"));
     main.appendChild(header); main.appendChild(element("div", "ai-edit-chat-error")); main.appendChild(element("div", "ai-edit-chat-messages"));
     const composer = element("div", "ai-edit-chat-composer");
-    const input = element("textarea", "ai-edit-chat-input"); input.placeholder = "Ask a follow-up… (Ctrl+Enter to send)"; input.setAttribute("aria-label", "Conversation message");
-    composer.appendChild(input); addButton(composer, "stop", "Stop").className = "ai-edit-btn danger"; addButton(composer, "send", "Send").className = "ai-edit-btn primary";
+    main.appendChild(element("div", "ai-edit-chat-attachments"));
+    const input = element("textarea", "ai-edit-chat-input"); input.placeholder = tr("chat.input"); input.setAttribute("aria-label", tr("chat.inputAria"));
+    composer.appendChild(input); addButton(composer, "stop", tr("common.stop")).className = "ai-edit-btn danger"; addButton(composer, "send", tr("chat.send")).className = "ai-edit-btn primary";
     main.appendChild(composer); root.appendChild(resize); root.appendChild(rail); root.appendChild(main); document.body.appendChild(root);
     root.addEventListener("click", onClick); input.addEventListener("keydown", onKeyDown);
     disposeResize = startResize(resize);
@@ -247,5 +268,25 @@ export function createChatPanel({ service, getDocumentIdentity, onInsertAssistan
     root.remove(); root = null;
   }
 
-  return { open, close, isOpen, refreshDocument };
+  function refreshLanguage() {
+    if (!isOpen()) return;
+    root.setAttribute("aria-label", tr("chat.title"));
+    const header = root.querySelector(".ai-edit-chat-header");
+    root.querySelector(".ai-edit-chat-title").textContent = tr("chat.title");
+    for (const [action, key] of [["new", "chat.new"], ["send", "chat.send"], ["stop", "common.stop"], ["close", null]]) {
+      const button = root.querySelector(`[data-action='${action}']`);
+      if (button && key) button.textContent = tr(key);
+      if (action === "close") button?.setAttribute("aria-label", tr("chat.close"));
+    }
+    const railButtons = root.querySelector(".ai-edit-chat-rail-header")?.children || [];
+    if (railButtons[1]) railButtons[1].textContent = tr("chat.hide");
+    const historyButton = header?.querySelector?.("[data-action='rail']");
+    if (historyButton) historyButton.textContent = tr("chat.history");
+    const input = root.querySelector(".ai-edit-chat-input");
+    input.placeholder = tr("chat.input");
+    input.setAttribute("aria-label", tr("chat.inputAria"));
+    render(service.getState());
+  }
+
+  return { open, close, isOpen, refreshDocument, refreshLanguage };
 }

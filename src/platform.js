@@ -549,7 +549,9 @@ async function requestOAuthToken(bodyParams) {
 
 async function refreshOAuthToken(settings, token, sourcePath) {
   if (!token.refresh) {
-    throw new Error("OAuth refresh token is unavailable.");
+    const error = new Error("OAuth refresh token is unavailable.");
+    error.uiKey = "api.oauthRefreshUnavailable";
+    throw error;
   }
   const payload = await requestOAuthToken({
     grant_type: "refresh_token",
@@ -584,7 +586,10 @@ export function readToken(settings) {
 export async function getFreshToken(settings, minTtlSeconds = TOKEN_REFRESH_MIN_TTL_SECONDS) {
   const located = locateTokenRecord(settings);
   if (!located.ok || !located.token) {
-    throw new Error(located.message || "OAuth token unavailable.");
+    const error = new Error(located.message || "OAuth token unavailable.");
+    error.uiKey = located.state === "invalid" ? "api.oauthInvalid"
+      : located.state === "missing" ? "api.oauthMissing" : "api.oauthTokenUnavailable";
+    throw error;
   }
   return ensureFreshToken(settings, located.token, located.sourcePath, minTtlSeconds);
 }

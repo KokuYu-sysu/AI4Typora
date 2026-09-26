@@ -1,3 +1,5 @@
+import { translate } from "./i18n.js";
+
 function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
 }
@@ -94,6 +96,8 @@ function initialState() {
     pendingImage: null,
     requestStatus: "idle",
     error: null,
+    errorKey: null,
+    errorDetail: null,
   };
 }
 
@@ -106,18 +110,25 @@ function hasStoredAsset(value) {
   return value && typeof value === "object" && typeof value.assetId === "string";
 }
 
-export function createChatService({ store, createRequest, resolveSettings = () => ({}), now = () => new Date() } = {}) {
+export function createChatService({ store, createRequest, resolveSettings = () => ({}), getLanguage = () => "en", now = () => new Date() } = {}) {
   if (!store || typeof createRequest !== "function") throw new Error("Chat service requires a store and request factory.");
   let state = initialState();
   let activeRequest = null;
   let generation = 0;
   let navigation = 0;
   let lastFailed = null;
+  const activeSubmissions = new Set();
   const listeners = new Set();
+  const tr = (key) => translate(getLanguage(), key);
 
   const emit = () => listeners.forEach((listener) => listener(clone(state)));
   const set = (patch) => {
-    state = { ...state, ...patch };
+    state = {
+      ...state,
+      ...patch,
+      ...(Object.prototype.hasOwnProperty.call(patch, "error") && !Object.prototype.hasOwnProperty.call(patch, "errorKey") ? { errorKey: null } : {}),
+      ...(Object.prototype.hasOwnProperty.call(patch, "error") && !Object.prototype.hasOwnProperty.call(patch, "errorDetail") ? { errorDetail: null } : {}),
+    };
     emit();
   };
   const same = (requestGeneration, identity, id) => (
@@ -130,8 +141,14 @@ export function createChatService({ store, createRequest, resolveSettings = () =
     return sessions;
   };
   const releasePending = async (image = state.pendingImage) => {
-    if (hasStoredAsset(image)) await store.releaseImageAsset(image);
+    if (hasStoredAsset(image) && ![...activeSubmissions].some((submission) => submission.image === image)) await store.releaseImageAsset(image);
   };
+  async function removePendingImage() {
+    if (!state.pendingImage || [...activeSubmissions].some((submission) => submission.image === state.pendingImage && submission.navigation === navigation)) return;
+    const image = state.pendingImage;
+    set({ pendingImage: null });
+    await releasePending(image);
+  }
   const abort = () => {
     generation += 1;
     const handle = activeRequest;
@@ -189,10 +206,10 @@ export function createChatService({ store, createRequest, resolveSettings = () =
 
   async function send(rawText, options = {}) {
     const text = String(rawText || "").trim();
-    if (!text || state.requestStatus === "streaming") return;
+    if (!text || state.requestStatus === "sending" || state.requestStatus === "streaming" || [...activeSubmissions].some((submission) => submission.navigation === navigation && submission.generation === generation)) return;
     const identity = state.documentIdentity;
     if (!identity?.persistable) {
-      set({ error: "Please save the Markdown document before starting a conversation." });
+      set({ error: tr("chat.saveDocument"), errorKey: "chat.saveDocument" });
       return;
     }
     const requestGeneration = ++generation;
@@ -202,26 +219,29 @@ export function createChatService({ store, createRequest, resolveSettings = () =
       && state.documentIdentity?.key === identity.key
       && (!id || state.activeSession?.id === id);
     let session = state.activeSession;
-    let image = state.pendingImage;
+    const image = state.pendingImage;
+    const submission = { image, navigation: navigationGeneration, generation: requestGeneration };
+    activeSubmissions.add(submission);
+    set({ requestStatus: "sending" });
     let savedImage = null;
     let imagePersisted = false;
+    let appendFailed = false;
     try {
+      if (image) savedImage = hasStoredAsset(image) ? image : await store.saveImageAsset(imageSource(image));
+      if (!current()) {
+        if (savedImage && savedImage !== image) await store.releaseImageAsset(savedImage);
+        return;
+      }
       if (!session) {
-        if (image) savedImage = hasStoredAsset(image) ? image : await store.saveImageAsset(imageSource(image));
-        if (!current()) {
-          if (savedImage) await store.releaseImageAsset(savedImage);
-          return;
-        }
         const createdAt = timestamp(now);
         session = await store.createSession(identity, {
           id: sessionId(), title: titleFor(text), mode: savedImage ? "image" : "text", createdAt, updatedAt: createdAt,
         });
         if (!current()) {
-          if (savedImage) await store.releaseImageAsset(savedImage);
+          if (savedImage && savedImage !== image) await store.releaseImageAsset(savedImage);
           return;
         }
-        set({ activeSession: session, draftMode: false, pendingImage: null });
-        image = savedImage;
+        set({ activeSession: session, draftMode: false });
       }
       let user = options.retryMessageId
         ? session.messages.find((message) => message.id === options.retryMessageId && message.role === "user")
@@ -230,16 +250,34 @@ export function createChatService({ store, createRequest, resolveSettings = () =
       if (!user) {
         user = {
           id: messageId(), role: "user", content: text, createdAt: timestamp(now), status: "complete",
-          ...(image ? { image: clone(image) } : {}),
+          ...(savedImage ? { image: clone(savedImage) } : {}),
         };
       }
-      const persisted = reusingUser
-        ? session
-        : await store.appendMessage(identity, session.id, user);
-      imagePersisted = Boolean(user.image);
+      let persisted;
+      try {
+        persisted = reusingUser ? session : await store.appendMessage(identity, session.id, user);
+      } catch (error) {
+        appendFailed = true;
+        if (error.historyPersisted) {
+          persisted = await store.getSession(identity, session.id);
+          if (!persisted?.messages.some((message) => message.id === user.id)) throw error;
+        } else {
+          if (hasStoredAsset(image) && current(session.id)) {
+            const source = imageSource(image);
+            set({ pendingImage: source ? { source } : null });
+            if (!source) {
+              const reattachError = new Error(error?.message || "");
+              reattachError.errorKey = "chat.reattachImage";
+              throw reattachError;
+            }
+          }
+          throw error;
+        }
+      }
+      imagePersisted = Boolean(persisted.messages.find((message) => message.id === user.id)?.image);
       if (!current(session.id)) return;
       session = persisted;
-      set({ activeSession: session, pendingImage: null, error: null });
+      set({ activeSession: session, pendingImage: imagePersisted ? null : state.pendingImage, error: null });
       const sessions = await store.listSessions(identity);
       if (!current(session.id)) return;
       set({ sessions });
@@ -282,7 +320,12 @@ export function createChatService({ store, createRequest, resolveSettings = () =
         if (!same(requestGeneration, identity, session.id)) return;
         activeRequest = null;
         lastFailed = { text, sessionId: session.id, messageId: user.id };
-        set({ activeSession: session, requestStatus: "idle", error: error?.name === "AbortError" ? null : String(error?.message || "The request failed. Try again.") });
+        set({
+          activeSession: session,
+          requestStatus: "idle",
+          error: error?.name === "AbortError" || error?.uiKey ? null : String(error?.message || tr("chat.requestFailed")),
+          errorKey: error?.name === "AbortError" ? null : error?.uiKey || (error?.message ? null : "chat.requestFailed"),
+        });
         return;
       }
       if (!same(requestGeneration, identity, session.id)) return;
@@ -292,13 +335,18 @@ export function createChatService({ store, createRequest, resolveSettings = () =
       await persistAssistant(identity, session.id, assistant, requestGeneration);
       if (same(requestGeneration, identity, session.id)) set({ requestStatus: "idle", error: null });
     } catch (error) {
-      if (savedImage && !imagePersisted) {
+      if (savedImage && savedImage !== image && !imagePersisted && !appendFailed) {
         await store.releaseImageAsset(savedImage).catch(() => {});
       }
       if (current(session?.id || "")) {
         lastFailed = { text, sessionId: session?.id || "", messageId: "" };
-        set({ requestStatus: "idle", error: String(error?.message || "The request failed. Try again.") });
+        set({ requestStatus: "idle", error: error?.errorKey ? null : String(error?.message || tr("chat.requestFailed")), errorKey: error?.errorKey || (error?.message ? null : "chat.requestFailed"), errorDetail: error?.errorKey ? error.message || null : null });
       }
+    } finally {
+      if (image && hasStoredAsset(image) && navigation !== navigationGeneration && !imagePersisted && !appendFailed) {
+        await store.releaseImageAsset(image).catch(() => {});
+      }
+      activeSubmissions.delete(submission);
     }
   }
 
@@ -315,7 +363,7 @@ export function createChatService({ store, createRequest, resolveSettings = () =
     set({ activeSession: { ...session, messages: [...session.messages.slice(0, -1), stopped] }, requestStatus: "idle", error: null });
     return persistAssistant(identity, session.id, stopped).catch((error) => {
       if (state.documentIdentity?.key === identity.key && state.activeSession?.id === session.id) {
-        set({ error: String(error?.message || "Unable to save the stopped response.") });
+        set({ error: String(error?.message || tr("chat.saveStopped")), errorKey: error?.message ? null : "chat.saveStopped" });
       }
     });
   }
@@ -351,6 +399,7 @@ export function createChatService({ store, createRequest, resolveSettings = () =
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     openDraft,
     openSession,
+    removePendingImage,
     send,
     retryLastFailed,
     stop,

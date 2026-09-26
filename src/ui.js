@@ -1,4 +1,6 @@
-﻿function removeElement(selector) {
+﻿import { translate } from "./i18n.js";
+
+function removeElement(selector) {
   const element = document.querySelector(selector);
   if (element) {
     element.remove();
@@ -17,6 +19,9 @@ export function ensureStyles() {
     .ai-edit-toast.info { background: #2563eb; }
     .ai-edit-toast.success { background: #15803d; }
     .ai-edit-toast.error { background: #dc2626; }
+    .ai-edit-shortcut-guide { position: fixed; bottom: 38px; right: 16px; z-index: 999995; display: flex; align-items: flex-start; gap: 10px; max-width: min(460px, calc(100vw - 32px)); box-sizing: border-box; padding: 10px 12px; border: 1px solid #dbe1ea; border-radius: 10px; background: #fff; box-shadow: 0 8px 28px rgba(15,23,42,.16); color: #334155; font-size: 12px; line-height: 1.45; }
+    .ai-edit-shortcut-guide-text { display: flex; flex: 1; flex-direction: column; gap: 3px; }
+    .ai-edit-shortcut-guide-close { border: 0; background: transparent; color: #64748b; font-size: 18px; line-height: 1; cursor: pointer; }
     .ai-edit-menu { position: fixed; z-index: 999998; min-width: 220px; padding: 6px 0; background: rgba(255,255,255,0.98); border: 1px solid rgba(15,23,42,0.12); border-radius: 10px; box-shadow: 0 16px 40px rgba(15,23,42,0.18); font-size: 13px; }
     .ai-edit-menu-item { padding: 8px 14px; cursor: pointer; }
     .ai-edit-menu-item-title { font-size: 13px; color: #111827; }
@@ -58,7 +63,7 @@ export function ensureStyles() {
     .ai-edit-setting-note { margin-top: 8px; font-size: 12px; color: #6b7280; }
     .ai-edit-setting-status.ok { color: #15803d; }
     .ai-edit-setting-status.bad { color: #dc2626; }
-    .ai-edit-chat-panel { position: fixed; right: 0; top: 0; bottom: 0; width: 460px; min-width: 360px; max-width: 720px; z-index: 999996; display: flex; background: #fff; border-left: 1px solid #dbe1ea; box-shadow: -10px 0 28px rgba(15,23,42,.12); color: #111827; font-size: 13px; }
+    .ai-edit-chat-panel { position: fixed; right: 0; top: 28px; bottom: 0; width: min(460px, 100vw); min-width: min(360px, 100vw); max-width: min(720px, 100vw); z-index: 999996; display: flex; background: #fff; border-left: 1px solid #dbe1ea; box-shadow: -10px 0 28px rgba(15,23,42,.12); color: #111827; font-size: 13px; }
     .ai-edit-chat-resize { width: 5px; cursor: col-resize; flex: 0 0 5px; }
     .ai-edit-chat-rail { width: 160px; flex: 0 0 160px; border-right: 1px solid #e5e7eb; overflow: auto; transition: width .15s, flex-basis .15s; }
     .ai-edit-chat-rail.collapsed { width: 0; flex-basis: 0; overflow: hidden; }
@@ -71,6 +76,7 @@ export function ensureStyles() {
     .ai-edit-chat-main { min-width: 0; flex: 1; display: flex; flex-direction: column; }.ai-edit-chat-header { border-bottom: 1px solid #e5e7eb; font-weight: 600; }.ai-edit-chat-header .ai-edit-dialog-close { margin-left: auto; }
     .ai-edit-chat-error { color: #b91c1c; min-height: 0; padding: 0 8px; }.ai-edit-chat-messages { flex: 1; overflow: auto; padding: 8px; }
     .ai-edit-chat-message { margin: 0 0 10px; padding: 8px; border-radius: 8px; background: #f8fafc; }.ai-edit-chat-message.user { background: #eff6ff; }.ai-edit-chat-role { font-weight: 600; margin-bottom: 4px; }.ai-edit-chat-content { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+    .ai-edit-chat-attachments { padding: 0 8px; }.ai-edit-chat-pending-image { display: inline-flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; background: #eff6ff; color: #1d4ed8; }.ai-edit-chat-pending-image button { padding: 0 5px; }.ai-edit-chat-image-marker { display: inline-block; margin-bottom: 4px; color: #1d4ed8; font-size: 12px; }
     .ai-edit-chat-composer { border-top: 1px solid #e5e7eb; }.ai-edit-chat-input { flex: 1; min-height: 58px; resize: vertical; border: 1px solid #d1d5db; border-radius: 7px; padding: 6px; font: inherit; }
   `;
   document.head.appendChild(style);
@@ -88,6 +94,42 @@ export function showToast(message, type = "info", duration = 2600) {
   toast.textContent = message;
   document.body.appendChild(toast);
   window.setTimeout(() => toast.remove(), duration);
+}
+
+export function closeShortcutGuide() {
+  removeElement("#ai-edit-shortcut-guide");
+}
+
+export function showShortcutGuide(chatShortcut = "Ctrl+E", language = "en") {
+  closeShortcutGuide();
+  ensureStyles();
+  const guide = document.createElement("div");
+  guide.id = "ai-edit-shortcut-guide";
+  guide.className = "ai-edit-shortcut-guide";
+  guide.setAttribute("role", "status");
+  const text = document.createElement("div");
+  text.className = "ai-edit-shortcut-guide-text";
+  for (const label of [
+    "AI Edit",
+    translate(language, "hint.chat", { shortcut: chatShortcut }),
+    translate(language, "hint.optimize"),
+    translate(language, "hint.context"),
+  ]) {
+    const row = document.createElement("div");
+    row.className = "ai-edit-shortcut-guide-row";
+    row.textContent = label;
+    text.appendChild(row);
+  }
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "ai-edit-shortcut-guide-close";
+  close.setAttribute("aria-label", translate(language, "hint.close"));
+  close.textContent = "×";
+  close.addEventListener("click", closeShortcutGuide);
+  guide.appendChild(text);
+  guide.appendChild(close);
+  document.body.appendChild(guide);
+  return guide;
 }
 
 let activeMenu = null;
@@ -271,6 +313,7 @@ export function closeAnyDialog(reason = "superseded") {
 
 export function promptForText(options) {
   closeAnyDialog();
+  const tr = (key) => translate(options.language ?? "en", key);
   return new Promise((resolve) => {
     const overlay = document.createElement("div");
     overlay.id = "ai-edit-dialog-overlay";
@@ -286,9 +329,9 @@ export function promptForText(options) {
           <textarea id="ai-edit-dialog-input" class="ai-edit-dialog-input" placeholder="${options.placeholder || ""}"></textarea>
         </div>
         <div class="ai-edit-dialog-footer">
-          <button class="ai-edit-btn secondary" data-action="cancel">Cancel</button>
+          <button class="ai-edit-btn secondary" data-action="cancel">${tr("common.cancel")}</button>
           <div class="ai-edit-spacer"></div>
-          <button class="ai-edit-btn primary" data-action="confirm">${options.confirmText || "Start"}</button>
+          <button class="ai-edit-btn primary" data-action="confirm">${options.confirmText || tr("common.start")}</button>
         </div>
       </div>
     `;
@@ -336,8 +379,9 @@ export function promptForText(options) {
 }
 
 /** A small, destructive-action confirmation that shares the plugin dialog lifecycle. */
-export function confirmAction({ title = "Confirm", message = "", confirmText = "Confirm" } = {}) {
+export function confirmAction({ title, message = "", confirmText, language = "en" } = {}) {
   closeAnyDialog();
+  const tr = (key) => translate(language, key);
   return new Promise((resolve) => {
     const overlay = document.createElement("div");
     overlay.id = "ai-edit-dialog-overlay";
@@ -348,11 +392,11 @@ export function confirmAction({ title = "Confirm", message = "", confirmText = "
     header.className = "ai-edit-dialog-header";
     const heading = document.createElement("div");
     heading.className = "ai-edit-dialog-title";
-    heading.textContent = String(title);
+    heading.textContent = String(title ?? tr("common.confirm"));
     const close = document.createElement("button");
     close.className = "ai-edit-dialog-close";
     close.dataset.action = "cancel";
-    close.setAttribute("aria-label", "Cancel");
+    close.setAttribute("aria-label", tr("common.cancel"));
     close.textContent = "×";
     header.append(heading, close);
     const body = document.createElement("div");
@@ -364,14 +408,14 @@ export function confirmAction({ title = "Confirm", message = "", confirmText = "
     cancel.className = "ai-edit-btn secondary";
     cancel.dataset.action = "cancel";
     cancel.type = "button";
-    cancel.textContent = "Cancel";
+    cancel.textContent = tr("common.cancel");
     const spacer = document.createElement("div");
     spacer.className = "ai-edit-spacer";
     const confirm = document.createElement("button");
     confirm.className = "ai-edit-btn danger";
     confirm.dataset.action = "confirm";
     confirm.type = "button";
-    confirm.textContent = String(confirmText);
+    confirm.textContent = String(confirmText ?? tr("common.confirm"));
     footer.append(cancel, spacer, confirm);
     dialogElement.append(header, body, footer);
     overlay.appendChild(dialogElement);
@@ -409,6 +453,7 @@ export function confirmAction({ title = "Confirm", message = "", confirmText = "
 
 export function createStreamDialog(options) {
   closeAnyDialog();
+  const tr = (key) => translate(options.language ?? "en", key);
   const overlay = document.createElement("div");
   overlay.id = "ai-edit-dialog-overlay";
   overlay.className = "ai-edit-overlay";
@@ -422,7 +467,7 @@ export function createStreamDialog(options) {
         <textarea id="ai-edit-stream-output" class="ai-edit-dialog-input" readonly></textarea>
       </div>
       <div class="ai-edit-dialog-footer" id="ai-edit-stream-footer">
-        <button class="ai-edit-btn danger" data-action="stop">Stop</button>
+        <button class="ai-edit-btn danger" data-action="stop">${tr("common.stop")}</button>
         <div class="ai-edit-spacer"></div>
       </div>
     </div>
@@ -432,8 +477,8 @@ export function createStreamDialog(options) {
 
   const output = overlay.querySelector("#ai-edit-stream-output");
   const footer = overlay.querySelector("#ai-edit-stream-footer");
-  output.value = options.waitingText || "Waiting for response...";
-  const waitingText = options.waitingText || "Waiting for response...";
+  output.value = options.waitingText || tr("stream.waiting");
+  const waitingText = options.waitingText || tr("stream.waiting");
   let completedActions = null;
   let closed = false;
 
@@ -459,7 +504,7 @@ export function createStreamDialog(options) {
   function copyOutputAndClose() {
     const text = output.value === waitingText ? "" : output.value;
     navigator.clipboard?.writeText(text).catch(() => {});
-    showToast("Copied to clipboard.", "success");
+    showToast(tr("common.copied"), "success");
     api.close("copy");
   }
 
@@ -542,7 +587,7 @@ export function createStreamDialog(options) {
       }
       completedActions = null;
       output.value = `${output.value}\n\n${message}`.trim();
-      footer.innerHTML = '<div class="ai-edit-spacer"></div><button class="ai-edit-btn primary" data-action="close">Close</button>';
+      footer.innerHTML = `<div class="ai-edit-spacer"></div><button class="ai-edit-btn primary" data-action="close">${tr("common.close")}</button>`;
     },
     showCompleted(completedOptions) {
       if (closed) {
@@ -553,7 +598,7 @@ export function createStreamDialog(options) {
       const copyButton = document.createElement("button");
       copyButton.className = "ai-edit-btn secondary";
       copyButton.dataset.action = "copy";
-      copyButton.textContent = "Copy";
+      copyButton.textContent = tr("common.copy");
       footer.appendChild(copyButton);
 
       if (completedOptions.validationMessage) {
@@ -571,14 +616,14 @@ export function createStreamDialog(options) {
       const closeButton = document.createElement("button");
       closeButton.className = "ai-edit-btn secondary";
       closeButton.dataset.action = "close";
-      closeButton.textContent = "Close";
+      closeButton.textContent = tr("common.close");
       footer.appendChild(closeButton);
 
       if (completedOptions.replaceAllowed !== false) {
         const confirmButton = document.createElement("button");
         confirmButton.className = "ai-edit-btn primary";
         confirmButton.dataset.action = "confirm";
-        confirmButton.textContent = completedOptions.confirmText || "Insert";
+        confirmButton.textContent = completedOptions.confirmText || tr("common.insert");
         footer.appendChild(confirmButton);
       }
       footer.onclick = (event) => {

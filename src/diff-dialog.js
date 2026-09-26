@@ -1,4 +1,5 @@
 import { buildTextDiff } from "./text-diff.js";
+import { translate } from "./i18n.js";
 import { ensureStyles, makeDialogDraggable, registerDialog, unregisterDialog } from "./ui.js";
 
 const COLLAPSE_AFTER = 600;
@@ -19,11 +20,11 @@ function addButton(parent, action, label, kind = "secondary") {
   return button;
 }
 
-function renderOperation(parent, operation) {
+function renderOperation(parent, operation, tr) {
   if (operation.type === "equal" && operation.text.length > COLLAPSE_AFTER) {
     const collapsed = addElement(parent, "span", "ai-edit-diff-equal");
     addElement(collapsed, "span", "", operation.text.slice(0, CONTEXT_LENGTH));
-    const expand = addElement(collapsed, "button", "ai-edit-diff-collapsed", "Show unchanged text…");
+    const expand = addElement(collapsed, "button", "ai-edit-diff-collapsed", tr("diff.showUnchanged"));
     expand.type = "button";
     expand.addEventListener("click", () => {
       collapsed.replaceChildren();
@@ -39,6 +40,7 @@ function renderOperation(parent, operation) {
 
 export function createDiffDialog(options) {
   ensureStyles();
+  const tr = (key) => translate(options.language ?? "en", key);
 
   const overlay = document.createElement("div");
   overlay.id = "ai-edit-dialog-overlay";
@@ -50,11 +52,11 @@ export function createDiffDialog(options) {
   dialogElement.setAttribute("aria-labelledby", titleId);
   dialogElement.tabIndex = -1;
   const header = addElement(dialogElement, "div", "ai-edit-dialog-header");
-  const title = addElement(header, "div", "ai-edit-dialog-title", options.title || "Rewrite");
+  const title = addElement(header, "div", "ai-edit-dialog-title", options.title || tr("diff.rewrite"));
   title.id = titleId;
   const closeButton = addButton(header, "close", "×");
   closeButton.className = "ai-edit-dialog-close";
-  closeButton.setAttribute("aria-label", "Close dialog");
+  closeButton.setAttribute("aria-label", tr("common.closeDialog"));
   const body = addElement(dialogElement, "div", "ai-edit-dialog-body");
   const output = addElement(body, "div", "ai-edit-diff-output");
   const validation = addElement(body, "div", "ai-edit-diff-validation");
@@ -87,14 +89,14 @@ export function createDiffDialog(options) {
   function renderDiff() {
     output.replaceChildren();
     for (const operation of buildTextDiff(options.originalText, candidateText, options.diffOptions)) {
-      renderOperation(output, operation);
+      renderOperation(output, operation, tr);
     }
   }
 
   function showStopped() {
     state = "stopped";
-    validation.textContent = "Generation stopped. This partial result cannot replace the selection.";
-    renderFooter([["copy", "Copy"], ["regenerate", "Regenerate"], ["close", "Close"]]);
+    validation.textContent = tr("diff.stopped");
+    renderFooter([["copy", tr("common.copy")], ["regenerate", tr("common.regenerate")], ["close", tr("common.close")]]);
   }
 
   function beginGeneration() {
@@ -103,8 +105,8 @@ export function createDiffDialog(options) {
     candidateText = "";
     replaceAllowed = false;
     validation.textContent = "";
-    renderPreview("Waiting for response…");
-    renderFooter([["stop", "Stop", "danger"]]);
+    renderPreview(tr("common.waiting"));
+    renderFooter([["stop", tr("common.stop"), "danger"]]);
   }
 
   function setStreamingText(text) {
@@ -120,8 +122,8 @@ export function createDiffDialog(options) {
     replaceAllowed = result.replaceAllowed !== false;
     validation.textContent = result.validationMessage || "";
     renderDiff();
-    const actions = [["copy", "Copy"], ["regenerate", "Regenerate"], ["close", "Close"]];
-    if (replaceAllowed) actions.push(["replace", "Replace", "primary"]);
+    const actions = [["copy", tr("common.copy")], ["regenerate", tr("common.regenerate")], ["close", tr("common.close")]];
+    if (replaceAllowed) actions.push(["replace", tr("common.replace"), "primary"]);
     renderFooter(actions);
   }
 
@@ -129,9 +131,9 @@ export function createDiffDialog(options) {
     if (closed || state === "stopped" || state === "failed" || state === "complete") return;
     state = "failed";
     replaceAllowed = false;
-    validation.textContent = String(message || "Generation failed.");
+    validation.textContent = String(message || tr("diff.failed"));
     renderPreview(candidateText);
-    renderFooter([["regenerate", "Regenerate"], ["close", "Close"]]);
+    renderFooter([["regenerate", tr("common.regenerate")], ["close", tr("common.close")]]);
   }
 
   function close(reason = "close") {

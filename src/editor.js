@@ -128,25 +128,32 @@
     this.stopCaretTracking();
     if (typeof document === "undefined" || typeof document.addEventListener !== "function") return;
     this.getCaretDocumentIdentity = typeof getDocumentIdentity === "function" ? getDocumentIdentity : null;
-    this.caretTrackingHandler = () => {
-      try {
-        const selection = window.getSelection();
-        const writeEl = document.getElementById("write");
-        if (!selection || !writeEl || selection.rangeCount === 0) return;
-        const range = selection.getRangeAt(0).cloneRange();
-        if (!this.isChatCaretRangeUsable(range, writeEl)) return;
-        const identity = this.getCaretDocumentIdentity && this.getCaretDocumentIdentity();
-        const key = String(identity?.key || "");
-        if (!identity?.persistable || !key) {
-          this.lastCaretRange = null;
-          this.lastCaretDocumentKey = "";
-          return;
-        }
-        this.lastCaretRange = range;
-        this.lastCaretDocumentKey = key;
-      } catch (_) {}
-    };
+    this.caretTrackingHandler = () => this.captureCurrentCaret();
     document.addEventListener("selectionchange", this.caretTrackingHandler);
+    this.captureCurrentCaret();
+  }
+
+  captureCurrentCaret() {
+    try {
+      const selection = window.getSelection();
+      const writeEl = document.getElementById("write");
+      if (!selection || !writeEl || selection.rangeCount === 0) return false;
+      const range = selection.getRangeAt(0).cloneRange();
+      if (!this.isChatCaretRangeUsable(range, writeEl)) return false;
+      const identity = this.getCaretDocumentIdentity?.();
+      const key = String(identity?.key || "");
+      if (!identity?.persistable || !key) {
+        this.lastCaretRange = null;
+        this.lastCaretDocumentKey = "";
+        return false;
+      }
+      range.collapse(false);
+      this.lastCaretRange = range;
+      this.lastCaretDocumentKey = key;
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   stopCaretTracking() {
@@ -197,7 +204,8 @@
       selection.removeAllRanges();
       selection.addRange(range);
       if (!document.execCommand("insertText", false, payload)) return { ok: false, reason: "insert-failed" };
-      this.notifyEditorInput(writeEl);
+      // execCommand already emits Typora's input event. Emitting a second synthetic one
+      // while Typora is normalizing multi-line blocks can corrupt its editor state.
       return { ok: true };
     } catch (_) {
       return { ok: false, reason: "insert-failed" };
@@ -352,17 +360,84 @@
     return this.savedText || "";
   }
 
+  getActiveCodeMirror() {
+    try {
+      const wrapper = document.activeElement?.closest?.(".CodeMirror");
+      const writeEl = document.getElementById("write");
+      const editor = wrapper?.CodeMirror;
+      if (!wrapper?.isConnected || !writeEl?.contains?.(wrapper)
+        || typeof editor?.getSelection !== "function"
+        || typeof editor?.getCursor !== "function"
+        || typeof editor?.getRange !== "function"
+        || typeof editor?.replaceRange !== "function") return null;
+      return { wrapper, editor };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  getSelectedMarkdown() {
+    const file = window.File;
+    const editor = file?.editor;
+    if (typeof editor?.UserOp?.copyAsMarkdown !== "function" || file._CopyContentFlag) {
+      return "";
+    }
+    const originalFlag = file._CopyContentFlag;
+    let markdown = "";
+    try {
+      // Typora's copy serializer accepts a clipboard event. Capture its output
+      // without invoking a real copy operation or changing the user's clipboard.
+      file._CopyContentFlag = true;
+      editor.UserOp.copyAsMarkdown(editor, {
+        type: "copy",
+        clipboardData: {
+          setData(format, value) {
+            if (format === "text/plain") markdown = String(value);
+          },
+        },
+        preventDefault() {},
+      });
+      return markdown;
+    } catch (_) {
+      return "";
+    } finally {
+      file._CopyContentFlag = originalFlag;
+    }
+  }
+
   captureSelectionSnapshot(documentId) {
     const id = String(documentId || "");
     const selection = window.getSelection();
-    if (!id || !selection || selection.rangeCount === 0 || selection.isCollapsed) {
-      return null;
-    }
+    if (!id) return null;
     try {
-      const range = selection.getRangeAt(0).cloneRange();
-      const text = String(range.toString());
+      const visibleRange = selection && selection.rangeCount > 0 && !selection.isCollapsed
+        ? selection.getRangeAt(0)
+        : null;
+      const codeMirror = this.getActiveCodeMirror();
+      const rangeIsInCodeMirror = !visibleRange || (
+        codeMirror?.wrapper?.contains?.(visibleRange.startContainer)
+        && codeMirror.wrapper.contains(visibleRange.endContainer)
+      );
+      if (codeMirror && rangeIsInCodeMirror) {
+        const text = String(codeMirror.editor.getSelection());
+        if (!text) return null;
+        const from = { ...codeMirror.editor.getCursor("from") };
+        const to = { ...codeMirror.editor.getCursor("to") };
+        this.selectionSnapshot = { documentId: id, text, codeMirror, from, to };
+        return this.selectionSnapshot;
+      }
+      const source = visibleRange || this.savedRange;
+      if (!source) return null;
+      const range = source.cloneRange();
+      const domText = String(range.toString());
+      if (source === this.savedRange) {
+        const writeEl = document.getElementById("write");
+        if (!writeEl || !this.isRangeUsable(range, writeEl)
+          || !this.isRangeUsable({ startContainer: range.endContainer }, writeEl)) return null;
+      }
+      const text = source === this.savedRange ? domText : this.getSelectedMarkdown() || domText;
       if (!text) return null;
-      this.selectionSnapshot = { documentId: id, text, range };
+      this.selectionSnapshot = { documentId: id, text, domText, range };
       return this.selectionSnapshot;
     } catch (_) {
       return null;
@@ -374,12 +449,25 @@
       return { ok: false, reason: "document-changed" };
     }
     const writeEl = document.getElementById("write");
+    if (snapshot.codeMirror) {
+      const { wrapper, editor } = snapshot.codeMirror;
+      if (!wrapper.isConnected || !writeEl?.contains?.(wrapper)) {
+        return { ok: false, reason: "range-detached" };
+      }
+      try {
+        return String(editor.getRange(snapshot.from, snapshot.to)) === snapshot.text
+          ? { ok: true }
+          : { ok: false, reason: "selection-changed" };
+      } catch (_) {
+        return { ok: false, reason: "range-detached" };
+      }
+    }
     if (!writeEl || !this.isRangeUsable(snapshot.range, writeEl)
       || !this.isRangeUsable({ startContainer: snapshot.range?.endContainer }, writeEl)) {
       return { ok: false, reason: "range-detached" };
     }
     try {
-      if (String(snapshot.range.toString()) !== snapshot.text) {
+      if (String(snapshot.range.toString()) !== (snapshot.domText ?? snapshot.text)) {
         return { ok: false, reason: "selection-changed" };
       }
     } catch (_) {
@@ -392,6 +480,11 @@
     const validation = this.validateSelectionSnapshot(snapshot, currentDocumentId);
     if (!validation.ok) return validation;
     try {
+      if (snapshot.codeMirror) {
+        snapshot.codeMirror.editor.replaceRange(nextText, snapshot.from, snapshot.to);
+        if (this.selectionSnapshot === snapshot) this.selectionSnapshot = null;
+        return { ok: true };
+      }
       const selection = window.getSelection();
       if (!selection) return { ok: false, reason: "range-detached" };
       selection.removeAllRanges();

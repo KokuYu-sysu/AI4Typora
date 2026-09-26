@@ -1,4 +1,5 @@
 import { getFreshToken } from "./platform.js";
+import { withTyporaFormatRules } from "./typora-format.js";
 
 const CODEX_URL = "https://chatgpt.com/backend-api/codex/responses";
 
@@ -343,7 +344,9 @@ async function readErrorResponseText(response, signal) {
 async function callChatGptOauthApi(systemPrompt, messages, settings, onChunk, signal) {
   const token = await getFreshToken(settings);
   if (!token) {
-    throw new Error("OAuth token unavailable.");
+    const error = new Error("OAuth token unavailable.");
+    error.uiKey = "api.oauthTokenUnavailable";
+    throw error;
   }
   throwIfAborted(signal);
   const response = await fetch(CODEX_URL, {
@@ -411,7 +414,9 @@ async function callOpenAiCompatApiWithFailover(
 ) {
   const candidates = getCompatCandidates(settings);
   if (!candidates.length) {
-    throw new Error("OpenAI compatible API is not configured.");
+    const error = new Error("OpenAI compatible API is not configured.");
+    error.uiKey = "api.compatNotConfigured";
+    throw error;
   }
 
   const failoverEnabled = settings?.openaiCompatFailoverEnabled !== false;
@@ -468,9 +473,10 @@ export function createAiRequest({
   let promise;
   try {
     const normalizedMessages = validateMessages(messages);
+    const effectiveSystemPrompt = withTyporaFormatRules(systemPrompt);
     promise = settings?.provider === "openai_compat"
       ? callOpenAiCompatApiWithFailover(
-        systemPrompt,
+        effectiveSystemPrompt,
         normalizedMessages,
         settings,
         onChunk,
@@ -478,7 +484,7 @@ export function createAiRequest({
         controller.signal,
       )
       : callChatGptOauthApi(
-        systemPrompt,
+        effectiveSystemPrompt,
         normalizedMessages,
         settings,
         onChunk,
